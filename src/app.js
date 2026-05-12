@@ -10,6 +10,12 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Resolve API is running'
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
