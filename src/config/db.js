@@ -1,44 +1,60 @@
 const mongoose = require('mongoose');
 const dns = require('dns');
 
-// Force Node.js c-ares to use Google DNS — avoids Windows resolver issues with SRV lookups
-dns.setServers(['8.8.8.8', '1.1.1.1']);
+let cached = global.mongoose;
 
-const MAX_RETRIES = 5;
-const BASE_DELAY_MS = 1000;
+if (!cached) {
+  cached = global.mongoose = {
+    conn: null,
+    promise: null,
+  };
+}
+
+// Fix local Windows / ISP DNS SRV issues.
+// Do not force this in production/serverless unless explicitly enabled.
+if (
+  process.env.NODE_ENV !== 'production' ||
+  process.env.FORCE_CUSTOM_DNS === 'true'
+) {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+}
 
 async function connectDB() {
   const uri = process.env.MONGODB_URI;
-  if (!uri) throw new Error('MONGODB_URI is not defined in environment');
 
-  let lastError;
-
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      await mongoose.connect(uri);
-      console.log(`MongoDB connected (attempt ${attempt})`);
-      return mongoose.connection;
-    } catch (err) {
-      lastError = err;
-      const delay = BASE_DELAY_MS * 2 ** (attempt - 1);
-      console.error(`MongoDB connection attempt ${attempt}/${MAX_RETRIES} failed: ${err.message}`);
-      if (attempt < MAX_RETRIES) {
-        console.log(`Retrying in ${delay}ms...`);
-        await sleep(delay);
-      }
-    }
+  if (!uri) {
+    throw new Error('MONGODB_URI is not defined in environment');
   }
 
-  throw new Error(`MongoDB failed after ${MAX_RETRIES} attempts: ${lastError.message}`);
+  if (cached.conn) {
+    return cached.conn;
+  }
+
+  if (!cached.promise) {
+    cached.promise = mongoose.connect(uri, {
+      bufferCommands: false,
+      serverSelectionTimeoutMS: 10000,
+    });
+  }
+
+  try {
+    cached.conn = await cached.promise;
+    console.log('MongoDB connected');
+    return cached.conn;
+  } catch (error) {
+    cached.promise = null;
+    console.error('MongoDB connection failed:', error.message);
+    throw error;
+  }
 }
 
 async function closeDB() {
-  await mongoose.connection.close();
-  console.log('MongoDB connection closed');
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  if (mongoose.connection.readyState !== 0) {
+    await mongoose.connection.close();
+    cached.conn = null;
+    cached.promise = null;
+    console.log('MongoDB connection closed');
+  }
 }
 
 module.exports = { connectDB, closeDB };
