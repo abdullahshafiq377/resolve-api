@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm --version)",
+      "Bash(npm install *)",
+      "Bash(git init *)",
+      "Bash(npm uninstall *)",
+      "Bash(node *)",
+      "Bash(timeout 30 tail *)",
+      "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const {connectDB,closeDB}=require\\('./src/config/db'\\); connectDB\\(\\).then\\(\\(\\)=>{ console.log\\('SUCCESS'\\); return closeDB\\(\\); }\\).catch\\(e=>{ console.error\\('FAIL:', e.message\\); }\\)\" 2>&1)",
+      "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const {connectDB,closeDB}=require\\('./src/config/db'\\); connectDB\\(\\).then\\(\\(\\)=>{ console.log\\('SUCCESS'\\); return closeDB\\(\\); }\\).catch\\(e=>{ console.error\\('FAIL:', e.message\\); }\\)\")",
+      "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const {connectDB,closeDB}=require\\('./src/config/db'\\); const Article=require\\('./src/models/Article'\\); connectDB\\(\\).then\\(async\\(\\)=>{ await Article.findOne\\(\\); console.log\\('Schema OK'\\); return closeDB\\(\\); }\\).catch\\(e=>console.error\\(e.message\\)\\);\")"
+    ]
+  }
+}
