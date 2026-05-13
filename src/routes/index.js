@@ -7,5 +7,7 @@ router.get('/', (req, res) => {
 });
 
 router.use('/articles', require('./articles'));
+router.use('/shorts', require('./shorts'));
+router.use('/admin', require('./admin'));
 
 module.exports = router;

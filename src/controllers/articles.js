@@ -1,21 +1,25 @@
 const Article = require('../models/Article');
-const { generateUniqueSlug, toSlug } = require('../utils/slugify');
+const { generateUniqueSlug } = require('../utils/slugify');
+
+const MAX_LIMIT = 100;
 
 // GET /api/articles
 async function list(req, res) {
-  const { category, status, page = 1, limit = 10 } = req.query;
+  const { category, status } = req.query;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || 10));
 
   const filter = {};
   if (category) filter.category = category;
   if (status) filter.status = status;
 
-  const skip = (Number(page) - 1) * Number(limit);
+  const skip = (page - 1) * limit;
 
   const [articles, total] = await Promise.all([
     Article.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(Number(limit))
+      .limit(limit)
       .select('-body'),
     Article.countDocuments(filter),
   ]);
@@ -24,9 +28,9 @@ async function list(req, res) {
     data: articles,
     pagination: {
       total,
-      page: Number(page),
-      limit: Number(limit),
-      pages: Math.ceil(total / Number(limit)),
+      page,
+      limit,
+      pages: Math.ceil(total / limit),
     },
   });
 }
@@ -36,7 +40,7 @@ async function slugCheck(req, res) {
   const { title } = req.query;
   if (!title) return res.status(400).json({ error: 'title query param required' });
 
-  const slug = await generateUniqueSlug(title);
+  const slug = await generateUniqueSlug(title, Article);
   res.json({ slug });
 }
 
@@ -49,15 +53,21 @@ async function getBySlug(req, res) {
 
 // POST /api/articles
 async function create(req, res) {
-  const { title, publishDate, ...rest } = req.body;
+  const { title, excerpt, author, category, featuredImage, template, publishDate, status, body } = req.body;
 
-  const slug = await generateUniqueSlug(title);
+  const slug = await generateUniqueSlug(title, Article);
 
   const article = await Article.create({
     title,
     slug,
+    excerpt,
+    author,
+    category,
+    featuredImage,
+    template,
     publishDate: new Date(publishDate),
-    ...rest,
+    status,
+    body,
   });
 
   res.status(201).json(article);
@@ -65,14 +75,21 @@ async function create(req, res) {
 
 // PUT /api/articles/:id
 async function update(req, res) {
-  const { title, publishDate, slug: _ignoredSlug, ...rest } = req.body;
+  const { title, excerpt, author, category, featuredImage, template, publishDate, status, body } = req.body;
 
-  const patch = { ...rest };
-  if (title) {
+  const patch = {};
+  if (title !== undefined) {
     patch.title = title;
-    patch.slug = await generateUniqueSlug(title, req.params.id);
+    patch.slug = await generateUniqueSlug(title, Article, req.params.id);
   }
-  if (publishDate) patch.publishDate = new Date(publishDate);
+  if (excerpt !== undefined) patch.excerpt = excerpt;
+  if (author !== undefined) patch.author = author;
+  if (category !== undefined) patch.category = category;
+  if (featuredImage !== undefined) patch.featuredImage = featuredImage;
+  if (template !== undefined) patch.template = template;
+  if (publishDate !== undefined) patch.publishDate = new Date(publishDate);
+  if (status !== undefined) patch.status = status;
+  if (body !== undefined) patch.body = body;
 
   const article = await Article.findByIdAndUpdate(req.params.id, patch, {
     new: true,

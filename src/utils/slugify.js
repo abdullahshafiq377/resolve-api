@@ -1,5 +1,3 @@
-const Article = require('../models/Article');
-
 function toSlug(title) {
   return title
     .toLowerCase()
@@ -9,7 +7,7 @@ function toSlug(title) {
     .replace(/^-+|-+$/g, '');
 }
 
-async function generateUniqueSlug(title, excludeId = null) {
+async function generateUniqueSlug(title, Model, excludeId = null) {
   const base = toSlug(title);
   let slug = base;
   let counter = 1;
@@ -18,7 +16,7 @@ async function generateUniqueSlug(title, excludeId = null) {
     const query = { slug };
     if (excludeId) query._id = { $ne: excludeId };
 
-    const exists = await Article.exists(query);
+    const exists = await Model.exists(query);
     if (!exists) return slug;
 
     slug = `${base}-${counter}`;

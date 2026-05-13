@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 const dns = require('dns');
 
+if (process.env.CUSTOM_DNS === 'true') {
+  dns.setServers(['8.8.8.8', '1.1.1.1']);
+}
+
 let cached = global.mongoose;
 
 if (!cached) {
@@ -10,14 +14,6 @@ if (!cached) {
   };
 }
 
-// Fix local Windows / ISP DNS SRV issues.
-// Do not force this in production/serverless unless explicitly enabled.
-if (
-  process.env.NODE_ENV !== 'production' ||
-  process.env.FORCE_CUSTOM_DNS === 'true'
-) {
-  dns.setServers(['8.8.8.8', '1.1.1.1']);
-}
 
 async function connectDB() {
   const uri = process.env.MONGODB_URI;

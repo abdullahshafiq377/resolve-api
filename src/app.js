@@ -1,9 +1,12 @@
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const mongoose = require('mongoose');
 const { connectDB } = require('./config/db');
 
 const app = express();
+
+app.set('trust proxy', 1);
 
 app.use(cors());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
@@ -20,7 +23,7 @@ app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     uptime: process.uptime(),
-    dbState: require('mongoose').connection.readyState,
+    dbState: mongoose.connection.readyState,
   });
 });
 
