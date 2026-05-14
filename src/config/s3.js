@@ -70,4 +70,55 @@ async function createUploadUrl({ filename, contentType, fileSize, type = 'video'
   return { uploadUrl, fileKey, publicUrl: buildPublicUrl(fileKey) };
 }
 
-module.exports = { createUploadUrl };
+const ALLOWED_ARTICLE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
+const ALLOWED_ARTICLE_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
+const MAX_ARTICLE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB, no env override needed per spec
+
+async function createArticleUploadUrl({ filename, contentType, fileSize, type = 'featured' }) {
+  const ext = path.extname(filename).toLowerCase();
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+
+  if (type !== 'featured' && type !== 'body') {
+    throw badRequest('type must be "featured" or "body"');
+  }
+
+  // featured allows jpeg/png/webp only; body also allows gif
+  const allowedTypes = type === 'featured'
+    ? ALLOWED_IMAGE_TYPES
+    : ALLOWED_ARTICLE_IMAGE_TYPES;
+  const allowedExts = type === 'featured'
+    ? ALLOWED_IMAGE_EXTS
+    : ALLOWED_ARTICLE_IMAGE_EXTS;
+
+  if (!allowedTypes.has(contentType)) {
+    throw badRequest(
+      type === 'featured'
+        ? 'Featured image must be jpeg, png, or webp'
+        : 'Body image must be jpeg, png, webp, or gif'
+    );
+  }
+  if (!allowedExts.has(ext)) {
+    throw badRequest('Filename extension does not match the accepted types');
+  }
+  if (fileSize > MAX_ARTICLE_IMAGE_BYTES) {
+    throw badRequest('Image exceeds 10MB limit');
+  }
+
+  const fileKey = `articles/${type}/${year}/${month}/${crypto.randomUUID()}${ext}`;
+
+  const command = new PutObjectCommand({
+    Bucket: BUCKET,
+    Key: fileKey,
+    ContentType: contentType,
+    ContentLength: fileSize,
+  });
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn: SIGNED_URL_EXPIRY_SECONDS });
+
+  return { uploadUrl, fileKey, publicUrl: buildPublicUrl(fileKey) };
+}
+
+module.exports = { createUploadUrl, createArticleUploadUrl };
