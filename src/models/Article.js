@@ -19,6 +19,7 @@ const ArticleSchema = new mongoose.Schema(
     featured: { type: Boolean, default: false },
     highlight: { type: Boolean, default: false },
     status: { type: String, enum: STATUSES, default: 'draft' },
+    readTimeMinutes: { type: Number, default: null },
     body: { type: mongoose.Schema.Types.Mixed, required: true },
   },
   { timestamps: true }

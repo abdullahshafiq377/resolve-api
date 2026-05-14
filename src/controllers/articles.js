@@ -7,6 +7,16 @@ const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;
 const HIGHLIGHT_MAX = 3;
 
+function validateReadTime(value) {
+  if (value == null) return null;
+  if (!Number.isInteger(value) || value < 1) {
+    const err = new Error('readTimeMinutes must be a positive integer');
+    err.status = 400;
+    throw err;
+  }
+  return value;
+}
+
 async function assertFeaturedLimit(excludeId = null) {
   const query = { featured: true };
   if (excludeId) query._id = { $ne: excludeId };
@@ -96,11 +106,12 @@ async function create(req, res) {
     title, excerpt, author, category,
     featuredImage, featuredImageCaption, featuredImageKey,
     template, publishDate, status, body,
-    featured, highlight,
+    featured, highlight, readTimeMinutes,
   } = req.body;
 
   if (featured === true) await assertFeaturedLimit();
   if (highlight === true) await assertHighlightLimit();
+  const readTime = validateReadTime(readTimeMinutes);
 
   const slug = await generateUniqueSlug(title, Article);
 
@@ -111,6 +122,7 @@ async function create(req, res) {
     publishDate: new Date(publishDate),
     status, body,
     featured, highlight,
+    readTimeMinutes: readTime,
   });
 
   res.status(201).json(article);
@@ -122,7 +134,7 @@ async function update(req, res) {
     title, excerpt, author, category,
     featuredImage, featuredImageCaption, featuredImageKey,
     template, publishDate, status, body,
-    featured, highlight,
+    featured, highlight, readTimeMinutes,
   } = req.body;
 
   const current = await Article.findById(req.params.id);
@@ -131,6 +143,7 @@ async function update(req, res) {
   // Only check limits when toggling from false → true
   if (featured === true && !current.featured) await assertFeaturedLimit(req.params.id);
   if (highlight === true && !current.highlight) await assertHighlightLimit(req.params.id);
+  if (readTimeMinutes !== undefined) validateReadTime(readTimeMinutes);
 
   const patch = {};
   if (title !== undefined) {
@@ -149,6 +162,7 @@ async function update(req, res) {
   if (body !== undefined) patch.body = body;
   if (featured !== undefined) patch.featured = featured;
   if (highlight !== undefined) patch.highlight = highlight;
+  if (readTimeMinutes !== undefined) patch.readTimeMinutes = readTimeMinutes ?? null;
 
   const article = await Article.findByIdAndUpdate(req.params.id, patch, {
     new: true,
