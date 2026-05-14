@@ -8,7 +8,18 @@ const app = express();
 
 app.set('trust proxy', 1);
 
-app.use(cors());
+const ALLOWED_ORIGINS = [
+  'http://localhost:3000',
+  'https://resolve-webapp.vercel.app',
+];
+
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow server-to-server requests (no origin) and listed origins
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+}));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
