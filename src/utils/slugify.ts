@@ -1,4 +1,6 @@
-function toSlug(title) {
+import type { Model } from 'mongoose';
+
+export function toSlug(title: string): string {
   return title
     .toLowerCase()
     .trim()
@@ -7,13 +9,18 @@ function toSlug(title) {
     .replace(/^-+|-+$/g, '');
 }
 
-async function generateUniqueSlug(title, Model, excludeId = null) {
+export async function generateUniqueSlug(
+  title: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Model: Model<any>,
+  excludeId: string | null = null,
+): Promise<string> {
   const base = toSlug(title);
   let slug = base;
   let counter = 1;
 
   while (true) {
-    const query = { slug };
+    const query: Record<string, unknown> = { slug };
     if (excludeId) query._id = { $ne: excludeId };
 
     const exists = await Model.exists(query);
@@ -23,5 +30,3 @@ async function generateUniqueSlug(title, Model, excludeId = null) {
     counter++;
   }
 }
-
-module.exports = { toSlug, generateUniqueSlug };

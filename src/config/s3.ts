@@ -1,13 +1,13 @@
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const crypto = require('crypto');
-const path = require('path');
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import crypto from 'crypto';
+import path from 'path';
 
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
   },
 });
 
@@ -20,19 +20,41 @@ const ALLOWED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 const ALLOWED_VIDEO_EXTS = new Set(['.mp4']);
 const ALLOWED_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp']);
 
-const MAX_VIDEO_BYTES = (parseInt(process.env.SHORTS_MAX_UPLOAD_MB, 10) || 100) * 1024 * 1024;
-const MAX_IMAGE_BYTES = (parseInt(process.env.SHORTS_MAX_THUMBNAIL_MB, 10) || 10) * 1024 * 1024;
+const MAX_VIDEO_BYTES = (parseInt(process.env.SHORTS_MAX_UPLOAD_MB ?? '', 10) || 100) * 1024 * 1024;
+const MAX_IMAGE_BYTES = (parseInt(process.env.SHORTS_MAX_THUMBNAIL_MB ?? '', 10) || 10) * 1024 * 1024;
 
-function buildPublicUrl(key) {
+interface HttpError extends Error {
+  status?: number;
+}
+
+interface UploadUrlParams {
+  filename: string;
+  contentType: string;
+  fileSize: number;
+  type?: string;
+}
+
+interface UploadUrlResult {
+  uploadUrl: string;
+  fileKey: string;
+  publicUrl: string;
+}
+
+function buildPublicUrl(key: string): string {
   if (PUBLIC_BASE) return `${PUBLIC_BASE.replace(/\/$/, '')}/${key}`;
   return `https://${BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 }
 
-function badRequest(message) {
+function badRequest(message: string): HttpError {
   return Object.assign(new Error(message), { status: 400 });
 }
 
-async function createUploadUrl({ filename, contentType, fileSize, type = 'video' }) {
+export async function createUploadUrl({
+  filename,
+  contentType,
+  fileSize,
+  type = 'video',
+}: UploadUrlParams): Promise<UploadUrlResult> {
   const ext = path.extname(filename).toLowerCase();
 
   const now = new Date();
@@ -74,7 +96,12 @@ const ALLOWED_ARTICLE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/w
 const ALLOWED_ARTICLE_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const MAX_ARTICLE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB, no env override needed per spec
 
-async function createArticleUploadUrl({ filename, contentType, fileSize, type = 'featured' }) {
+export async function createArticleUploadUrl({
+  filename,
+  contentType,
+  fileSize,
+  type = 'featured',
+}: UploadUrlParams): Promise<UploadUrlResult> {
   const ext = path.extname(filename).toLowerCase();
 
   const now = new Date();
@@ -86,18 +113,14 @@ async function createArticleUploadUrl({ filename, contentType, fileSize, type = 
   }
 
   // featured allows jpeg/png/webp only; body also allows gif
-  const allowedTypes = type === 'featured'
-    ? ALLOWED_IMAGE_TYPES
-    : ALLOWED_ARTICLE_IMAGE_TYPES;
-  const allowedExts = type === 'featured'
-    ? ALLOWED_IMAGE_EXTS
-    : ALLOWED_ARTICLE_IMAGE_EXTS;
+  const allowedTypes = type === 'featured' ? ALLOWED_IMAGE_TYPES : ALLOWED_ARTICLE_IMAGE_TYPES;
+  const allowedExts = type === 'featured' ? ALLOWED_IMAGE_EXTS : ALLOWED_ARTICLE_IMAGE_EXTS;
 
   if (!allowedTypes.has(contentType)) {
     throw badRequest(
       type === 'featured'
         ? 'Featured image must be jpeg, png, or webp'
-        : 'Body image must be jpeg, png, webp, or gif'
+        : 'Body image must be jpeg, png, webp, or gif',
     );
   }
   if (!allowedExts.has(ext)) {
@@ -120,5 +143,3 @@ async function createArticleUploadUrl({ filename, contentType, fileSize, type = 
 
   return { uploadUrl, fileKey, publicUrl: buildPublicUrl(fileKey) };
 }
-
-module.exports = { createUploadUrl, createArticleUploadUrl };

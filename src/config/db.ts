@@ -1,21 +1,27 @@
-const mongoose = require('mongoose');
-const dns = require('dns');
+import mongoose from 'mongoose';
+import dns from 'dns';
 
 if (process.env.CUSTOM_DNS === 'true') {
   dns.setServers(['8.8.8.8', '1.1.1.1']);
 }
 
-let cached = global.mongoose;
-
-if (!cached) {
-  cached = global.mongoose = {
-    conn: null,
-    promise: null,
-  };
+interface MongooseCache {
+  conn: typeof mongoose | null;
+  promise: Promise<typeof mongoose> | null;
 }
 
+declare global {
+  // eslint-disable-next-line no-var
+  var mongoose: MongooseCache | undefined;
+}
 
-async function connectDB() {
+let cached: MongooseCache = global.mongoose ?? { conn: null, promise: null };
+
+if (!global.mongoose) {
+  global.mongoose = cached;
+}
+
+export async function connectDB(): Promise<typeof mongoose> {
   const uri = process.env.MONGODB_URI;
 
   if (!uri) {
@@ -39,12 +45,12 @@ async function connectDB() {
     return cached.conn;
   } catch (error) {
     cached.promise = null;
-    console.error('MongoDB connection failed:', error.message);
+    console.error('MongoDB connection failed:', (error as Error).message);
     throw error;
   }
 }
 
-async function closeDB() {
+export async function closeDB(): Promise<void> {
   if (mongoose.connection.readyState !== 0) {
     await mongoose.connection.close();
     cached.conn = null;
@@ -52,5 +58,3 @@ async function closeDB() {
     console.log('MongoDB connection closed');
   }
 }
-
-module.exports = { connectDB, closeDB };

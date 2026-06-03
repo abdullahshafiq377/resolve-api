@@ -11,7 +11,24 @@
       "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const {connectDB,closeDB}=require\\('./src/config/db'\\); connectDB\\(\\).then\\(\\(\\)=>{ console.log\\('SUCCESS'\\); return closeDB\\(\\); }\\).catch\\(e=>{ console.error\\('FAIL:', e.message\\); }\\)\")",
       "PowerShell(node -e \"require\\('dotenv'\\).config\\(\\); const {connectDB,closeDB}=require\\('./src/config/db'\\); const Article=require\\('./src/models/Article'\\); connectDB\\(\\).then\\(async\\(\\)=>{ await Article.findOne\\(\\); console.log\\('Schema OK'\\); return closeDB\\(\\); }\\).catch\\(e=>console.error\\(e.message\\)\\);\")",
       "Bash(curl -s http://localhost:8000/health)",
-      "Bash(curl -s \"http://localhost:8000/api/articles\")"
+      "Bash(curl -s \"http://localhost:8000/api/articles\")",
+      "Bash(npx tsc *)",
+      "Bash(npx tsx *)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/health)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:8000/api/articles)",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/admin/articles)",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/admin/users)",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" -X POST http://localhost:8000/api/webhooks/clerk -H \"Content-Type: application/json\" -d '{\"type\":\"user.created\",\"data\":{}}')",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/articles/__nope__)",
+      "Bash(curl -s \"http://localhost:8000/api/articles?status=draft\")",
+      "Bash(curl -s \"http://localhost:8000/api/articles?status=draft&limit=100\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\)['data']; print\\(set\\(a['status'] for a in d\\), 'count=',len\\(d\\)\\)\")",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(npx kill-port *)",
+      "Read(//tmp/**)",
+      "Bash(curl -s \"http://localhost:8000/api/articles?limit=1\")",
+      "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\)['data'];print\\(json.dumps\\(d[0].get\\('author'\\),indent=0\\) if d else 'no data'\\); print\\('has authorId key:', 'authorId' in \\(d[0] if d else {}\\)\\)\")",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/admin/users/moderators)"
     ]
   }
 }
