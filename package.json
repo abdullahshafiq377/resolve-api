@@ -8,7 +8,8 @@
     "start": "tsx src/server.ts",
     "dev": "nodemon --watch src --ext ts --exec \"tsx src/server.ts\"",
     "typecheck": "tsc --noEmit",
-    "migrate:article-authors": "tsx src/scripts/migrateArticleAuthors.ts"
+    "migrate:article-authors": "tsx src/scripts/migrateArticleAuthors.ts",
+    "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts"
   },
   "keywords": [],
   "author": "",

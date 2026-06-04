@@ -1,9 +1,10 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
 // Local mirror of Clerk users (§6). Used for relational data (FKs, joins, display
-// caching), not for role enforcement — backend role checks read super admin from
-// env (SUPER_ADMIN_USER_ID) first. A super admin row, if present, holds role 'free_user'.
-export type UserRole = 'moderator' | 'premium_user' | 'free_user';
+// caching), not for role enforcement. Tier (premium/free) is NOT stored here — it
+// is read live from Clerk's plan claim (BACKEND_BILLING.md). The only role value
+// ever set is 'moderator'; regular users (incl. super admin) carry NULL.
+export type UserRole = 'moderator';
 
 export interface UserDoc extends Document {
   clerkUserId: string;
@@ -26,7 +27,7 @@ const UserSchema = new Schema<UserDoc>(
     imageUrl: { type: String, default: null },
     role: {
       type: String,
-      enum: ['moderator', 'premium_user', 'free_user'],
+      enum: ['moderator'],
       default: null,
     },
     deletedAt: { type: Date, default: null },

@@ -28,7 +28,9 @@
       "Read(//tmp/**)",
       "Bash(curl -s \"http://localhost:8000/api/articles?limit=1\")",
       "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\)['data'];print\\(json.dumps\\(d[0].get\\('author'\\),indent=0\\) if d else 'no data'\\); print\\('has authorId key:', 'authorId' in \\(d[0] if d else {}\\)\\)\")",
-      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/admin/users/moderators)"
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" http://localhost:8000/api/admin/users/moderators)",
+      "Bash(curl -s -w \" <%{http_code}>\\\\n\" -X POST http://localhost:8000/api/webhooks/clerk -H \"Content-Type: application/json\" -d '{\"type\":\"subscription.updated\",\"data\":{}}')",
+      "PowerShell(npm run *)"
     ]
   }
 }

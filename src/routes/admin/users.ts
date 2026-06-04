@@ -98,11 +98,10 @@ router.post(
     if (role !== 'moderator' && role !== null) {
       return res.status(400).json({ error: 'invalid_role' });
     }
-    // null = demotion. Map to the documented baseline "free_user" rather than
-    // undefined/null — Clerk strips undefined, which would wipe the role field.
-    // If the demoted user still has an active subscription, the next Clerk Billing
-    // webhook re-promotes them to premium_user.
-    const nextRole = role === 'moderator' ? 'moderator' : 'free_user';
+    // null = demotion → clear the role. Tier is not a role (premium is read live
+    // from Clerk's plan claim, BACKEND_BILLING.md), so a demoted user simply has
+    // no role. Pass explicit null (Clerk strips undefined, but stores null).
+    const nextRole = role === 'moderator' ? 'moderator' : null;
     const updated = await clerk.users.updateUserMetadata(req.params.id, {
       publicMetadata: { role: nextRole },
     });

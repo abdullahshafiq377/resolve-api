@@ -41,7 +41,7 @@ async function ensureSuperAdminRow(superAdminId: string): Promise<void> {
 
   await User.updateOne(
     { clerkUserId: superAdminId },
-    { $set: { clerkUserId: superAdminId, email, displayName, imageUrl, role: 'free_user' } },
+    { $set: { clerkUserId: superAdminId, email, displayName, imageUrl, role: null } },
     { upsert: true },
   );
   console.log(`Inserted super admin row (${superAdminId}).`);
