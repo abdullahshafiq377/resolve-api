@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import crypto from 'crypto';
 import path from 'path';
@@ -49,6 +49,10 @@ function badRequest(message: string): HttpError {
   return Object.assign(new Error(message), { status: 400 });
 }
 
+export async function deleteS3Object(fileKey: string): Promise<void> {
+  await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: fileKey }));
+}
+
 export async function createUploadUrl({
   filename,
   contentType,
@@ -95,6 +99,9 @@ export async function createUploadUrl({
 const ALLOWED_ARTICLE_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif']);
 const ALLOWED_ARTICLE_IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif']);
 const MAX_ARTICLE_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB, no env override needed per spec
+const ALLOWED_ARTICLE_AUDIO_TYPES = new Set(['audio/mpeg']);
+const ALLOWED_ARTICLE_AUDIO_EXTS = new Set(['.mp3']);
+const MAX_ARTICLE_AUDIO_BYTES = 100 * 1024 * 1024;
 
 export async function createArticleUploadUrl({
   filename,
@@ -108,26 +115,32 @@ export async function createArticleUploadUrl({
   const year = now.getFullYear();
   const month = String(now.getMonth() + 1).padStart(2, '0');
 
-  if (type !== 'featured' && type !== 'body') {
-    throw badRequest('type must be "featured" or "body"');
+  if (type !== 'featured' && type !== 'body' && type !== 'audio') {
+    throw badRequest('type must be "featured", "body", or "audio"');
   }
 
-  // featured allows jpeg/png/webp only; body also allows gif
-  const allowedTypes = type === 'featured' ? ALLOWED_IMAGE_TYPES : ALLOWED_ARTICLE_IMAGE_TYPES;
-  const allowedExts = type === 'featured' ? ALLOWED_IMAGE_EXTS : ALLOWED_ARTICLE_IMAGE_EXTS;
+  if (type === 'audio') {
+    if (!ALLOWED_ARTICLE_AUDIO_TYPES.has(contentType)) throw badRequest('Audio must be an mp3 file');
+    if (!ALLOWED_ARTICLE_AUDIO_EXTS.has(ext)) throw badRequest('Audio filename must have a .mp3 extension');
+    if (fileSize > MAX_ARTICLE_AUDIO_BYTES) throw badRequest('Audio exceeds 100MB limit');
+  } else {
+    // featured allows jpeg/png/webp only; body also allows gif
+    const allowedTypes = type === 'featured' ? ALLOWED_IMAGE_TYPES : ALLOWED_ARTICLE_IMAGE_TYPES;
+    const allowedExts = type === 'featured' ? ALLOWED_IMAGE_EXTS : ALLOWED_ARTICLE_IMAGE_EXTS;
 
-  if (!allowedTypes.has(contentType)) {
-    throw badRequest(
-      type === 'featured'
-        ? 'Featured image must be jpeg, png, or webp'
-        : 'Body image must be jpeg, png, webp, or gif',
-    );
-  }
-  if (!allowedExts.has(ext)) {
-    throw badRequest('Filename extension does not match the accepted types');
-  }
-  if (fileSize > MAX_ARTICLE_IMAGE_BYTES) {
-    throw badRequest('Image exceeds 10MB limit');
+    if (!allowedTypes.has(contentType)) {
+      throw badRequest(
+        type === 'featured'
+          ? 'Featured image must be jpeg, png, or webp'
+          : 'Body image must be jpeg, png, webp, or gif',
+      );
+    }
+    if (!allowedExts.has(ext)) {
+      throw badRequest('Filename extension does not match the accepted types');
+    }
+    if (fileSize > MAX_ARTICLE_IMAGE_BYTES) {
+      throw badRequest('Image exceeds 10MB limit');
+    }
   }
 
   const fileKey = `articles/${type}/${year}/${month}/${crypto.randomUUID()}${ext}`;

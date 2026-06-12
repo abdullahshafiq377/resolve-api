@@ -1,6 +1,4 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-
-const CATEGORIES = ['Politics', 'Defence', 'Geopolitics', 'Economy', 'Opinion'] as const;
 const STATUSES = ['draft', 'published', 'archived'] as const;
 
 export interface ShortDoc extends Document {
@@ -12,7 +10,8 @@ export interface ShortDoc extends Document {
   thumbnailUrl?: string;
   thumbnailKey?: string;
   durationSeconds?: number;
-  category?: (typeof CATEGORIES)[number];
+  category?: string;
+  categoryId: mongoose.Types.ObjectId;
   tags: string[];
   featured: boolean;
   status: (typeof STATUSES)[number];
@@ -36,7 +35,8 @@ const ShortSchema = new Schema<ShortDoc>(
 
     durationSeconds: { type: Number, min: 0 },
 
-    category: { type: String, enum: CATEGORIES },
+    category: { type: String, trim: true },
+    categoryId: { type: Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
     tags: [{ type: String, trim: true }],
 
     featured: { type: Boolean, default: false },

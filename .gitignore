@@ -5,6 +5,7 @@ node_modules/
 .env
 .env.local
 .env.*.local
+.env.*
 
 # Logs
 logs/
@@ -35,3 +36,4 @@ docs
 /docs
 docs/articles-api.md
 /.claude
+/src/scripts/

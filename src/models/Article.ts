@@ -1,6 +1,4 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
-
-const CATEGORIES = ['Politics', 'Defence', 'Geopolitics', 'Economy', 'Opinion'] as const;
 const TEMPLATES = ['standard', 'longform', 'visual'] as const;
 const STATUSES = ['draft', 'published'] as const;
 
@@ -11,10 +9,13 @@ export interface ArticleDoc extends Document {
   // Clerk user ID of the owning moderator / super admin (§6a). Replaces the
   // former free-text `author` byline; display fields are joined from the users mirror.
   authorId: string;
-  category: (typeof CATEGORIES)[number];
+  category?: string;
+  categoryId: mongoose.Types.ObjectId;
   featuredImage: string;
   featuredImageCaption?: string;
   featuredImageKey?: string;
+  audioUrl?: string;
+  audioKey?: string;
   template: (typeof TEMPLATES)[number];
   publishDate: Date;
   featured: boolean;
@@ -23,6 +24,10 @@ export interface ArticleDoc extends Document {
   readTimeMinutes: number | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   body: any;
+  // SHA-256 of the extracted plain text of the last successfully-embedded body
+  // (Phase 2). Lets the embedding pipeline skip re-embedding on metadata-only
+  // edits / re-saves where the prose is unchanged. Absent until first embed.
+  bodyHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,10 +38,13 @@ const ArticleSchema = new Schema<ArticleDoc>(
     slug: { type: String, required: true, unique: true, trim: true, index: true },
     excerpt: { type: String, required: true, trim: true },
     authorId: { type: String, required: true, trim: true, index: true },
-    category: { type: String, enum: CATEGORIES, required: true },
+    category: { type: String, trim: true },
+    categoryId: { type: Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
     featuredImage: { type: String, required: true, trim: true },
     featuredImageCaption: { type: String, trim: true },
     featuredImageKey: { type: String, trim: true },
+    audioUrl: { type: String, trim: true },
+    audioKey: { type: String, trim: true },
     template: { type: String, enum: TEMPLATES, required: true },
     publishDate: { type: Date, required: true },
     featured: { type: Boolean, default: false },
@@ -44,6 +52,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     status: { type: String, enum: STATUSES, default: 'draft' },
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },
+    bodyHash: { type: String },
   },
   { timestamps: true },
 );

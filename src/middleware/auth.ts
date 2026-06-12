@@ -53,20 +53,35 @@ export function requireModerator(req: Request, res: Response, next: NextFunction
   next();
 }
 
+// Subset of the @clerk/express AuthObject (getAuth(req)) that premium evaluation needs.
+export interface PremiumAuth {
+  userId?: string | null;
+  sessionClaims?: unknown;
+  has?: (params: { plan: string }) => boolean;
+}
+
+// Authoritative premium check (overview §3): Clerk plan `user:premium_plan`,
+// PLUS moderator / super admin. This is the single server-side source of truth —
+// the frontend `useIsPremium()` is for UI only and is never trusted. Pass the
+// result of getAuth(req). Mirrors requirePremium's logic without short-circuiting
+// to an HTTP response, so handlers (e.g. chat) can branch on the boolean.
+export function isPremium(auth: PremiumAuth): boolean {
+  const { userId, sessionClaims, has } = auth;
+  if (!userId) return false;
+  if (isModerator(userId, sessionClaims)) return true;
+  return !!(has && has({ plan: PREMIUM_PLAN }));
+}
+
 // Premium OR moderator OR super admin (scaffold for future paid endpoints).
 // Premium is checked against Clerk's live plan claim via has() — no metadata
 // mirror, no DB lookup. Moderators/super admin pass implicitly.
 export function requirePremium(req: Request, res: Response, next: NextFunction): void {
-  const { userId, sessionClaims, has } = getAuth(req);
+  const { userId } = getAuth(req);
   if (!userId) {
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (isModerator(userId, sessionClaims)) {
-    next();
-    return;
-  }
-  if (has && has({ plan: PREMIUM_PLAN })) {
+  if (isPremium(getAuth(req))) {
     next();
     return;
   }

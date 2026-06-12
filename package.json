@@ -9,7 +9,11 @@
     "dev": "nodemon --watch src --ext ts --exec \"tsx src/server.ts\"",
     "typecheck": "tsc --noEmit",
     "migrate:article-authors": "tsx src/scripts/migrateArticleAuthors.ts",
-    "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts"
+    "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts",
+    "migrate:categories": "tsx src/scripts/migrateCategories.ts",
+    "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
+    "seed:articles": "tsx src/scripts/seedArticles.ts",
+    "create:vector-index": "tsx src/scripts/createVectorIndex.ts"
   },
   "keywords": [],
   "author": "",
@@ -19,6 +23,7 @@
     "@aws-sdk/s3-request-presigner": "^3.1045.0",
     "@clerk/backend": "^3.4.14",
     "@clerk/express": "^2.1.22",
+    "@google/genai": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
