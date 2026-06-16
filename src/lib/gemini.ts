@@ -96,6 +96,23 @@ export async function* streamChat(params: StreamChatParams): AsyncGenerator<stri
   }
 }
 
+export async function generateText(params: {
+  model?: string;
+  systemPrompt: string;
+  message: string;
+  safetySettings?: SafetySetting[];
+}): Promise<string> {
+  const response = await ai().models.generateContent({
+    model: params.model || CHAT_MODEL,
+    contents: [{ role: 'user', parts: [{ text: params.message }] }],
+    config: {
+      systemInstruction: params.systemPrompt,
+      safetySettings: params.safetySettings ?? DEFAULT_SAFETY_SETTINGS,
+    },
+  });
+  return response.text ?? '';
+}
+
 // 'RETRIEVAL_DOCUMENT' for stored article chunks, 'RETRIEVAL_QUERY' for the
 // user's question — Gemini embeds them into the same space but asymmetrically
 // for better retrieval. Returns one vector per input, in order.

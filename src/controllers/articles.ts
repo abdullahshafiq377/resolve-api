@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
 import type { Request, Response } from 'express';
 import Article, { ArticleDoc } from '../models/Article';
+import ArticleSummary from '../models/ArticleSummary';
 import Category, { CategoryDoc } from '../models/Category';
+import Region from '../models/Region';
 import { generateUniqueSlug } from '../utils/slugify';
 import { createArticleUploadUrl, deleteS3Object } from '../config/s3';
 import { httpError } from '../utils/errors';
@@ -13,6 +15,7 @@ import {
 } from '../services/users';
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categories';
+import { findActiveRegionIdsOrThrow, getGlobalRegion, serializeRegion } from '../services/regions';
 
 const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;
@@ -74,15 +77,25 @@ function applyCategory(obj: Record<string, unknown>, category: CategoryDoc | nul
 
 // Replace authorId with a nested author object joined from the users mirror (§6a).
 async function serializeArticle(doc: ArticleDoc): Promise<Record<string, unknown>> {
-  const [users, category] = await Promise.all([
+  const [users, category, regions, aiSummary] = await Promise.all([
     findUsersByIds([doc.authorId]),
     doc.categoryId ? Category.findById(doc.categoryId) : Promise.resolve(null),
+    Region.find({ _id: { $in: doc.regionIds ?? [] } }).sort({ order: 1, title: 1 }),
+    ArticleSummary.findOne({ articleId: doc._id, approved: true }).select('format content'),
   ]);
   const obj = doc.toObject() as Record<string, unknown>;
   delete obj.authorId;
   const user = users[0];
   obj.author = user ? toAuthorSummary(user) : fallbackAuthor(doc.authorId);
   applyCategory(obj, category, doc.category);
+  obj.regions = regions.map(serializeRegion);
+  obj.regionIds = regions.map((region) => String(region._id));
+  if (aiSummary) {
+    obj.aiSummary = {
+      format: aiSummary.format,
+      content: aiSummary.content,
+    };
+  }
   return obj;
 }
 
@@ -91,18 +104,28 @@ async function serializeArticles(docs: ArticleDoc[]): Promise<Record<string, unk
   const categoryIds = [
     ...new Set(docs.map((d) => d.categoryId?.toString()).filter((id): id is string => Boolean(id))),
   ];
-  const [users, categories] = await Promise.all([
+  const regionIds = [
+    ...new Set(docs.flatMap((d) => (d.regionIds ?? []).map(String)).filter(Boolean)),
+  ];
+  const [users, categories, regions] = await Promise.all([
     findUsersByIds(ids),
     Category.find({ _id: { $in: categoryIds } }),
+    Region.find({ _id: { $in: regionIds } }).sort({ order: 1, title: 1 }),
   ]);
   const map = new Map(users.map((u) => [u.clerkUserId, u]));
   const categoryMap = new Map(categories.map((category) => [String(category._id), category]));
+  const regionMap = new Map(regions.map((region) => [String(region._id), region]));
   return docs.map((d) => {
     const obj = d.toObject() as Record<string, unknown>;
     delete obj.authorId;
     const u = map.get(d.authorId);
     obj.author = u ? toAuthorSummary(u) : fallbackAuthor(d.authorId);
     applyCategory(obj, categoryMap.get(String(d.categoryId)), d.category);
+    const articleRegions = (d.regionIds ?? [])
+      .map((id) => regionMap.get(String(id)))
+      .filter((region): region is NonNullable<typeof region> => Boolean(region));
+    obj.regions = articleRegions.map(serializeRegion);
+    obj.regionIds = articleRegions.map((region) => String(region._id));
     return obj;
   });
 }
@@ -183,11 +206,18 @@ export async function getPublishedBySlug(req: Request, res: Response) {
   res.json(await serializeArticle(article));
 }
 
+// GET /api/admin/articles/slug/:slug (admin — any status)
+export async function getAdminBySlug(req: Request, res: Response) {
+  const article = await Article.findOne({ slug: req.params.slug });
+  if (!article) return res.status(404).json({ error: 'Article not found' });
+  res.json(await serializeArticle(article));
+}
+
 // POST /api/admin/articles
 export async function create(req: Request, res: Response) {
   const {
     title, excerpt, author_id,
-    categoryId, featuredImage, featuredImageCaption, featuredImageKey,
+    categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
     template, publishDate, status, body,
     featured, highlight, readTimeMinutes,
@@ -195,6 +225,9 @@ export async function create(req: Request, res: Response) {
 
   const authorId = await assertValidAuthor(author_id);
   const categoryDoc = await findCategoryByIdOrThrow(categoryId);
+  const selectedRegionIds = Array.isArray(regionIds) && regionIds.length > 0
+    ? await findActiveRegionIdsOrThrow(regionIds)
+    : [(await getGlobalRegion())._id];
   const nextStatus = normalizeStatus(status);
   const nextFeatured = nextStatus === 'published' && featured === true;
   const nextHighlight = nextStatus === 'published' && highlight === true;
@@ -206,6 +239,7 @@ export async function create(req: Request, res: Response) {
 
   const article = await Article.create({
     title, slug, excerpt, authorId, categoryId: categoryDoc._id, category: categoryDoc.title,
+    regionIds: selectedRegionIds,
     featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl: audioUrl || undefined, audioKey: audioKey || undefined,
     template,
@@ -227,7 +261,7 @@ export async function create(req: Request, res: Response) {
 export async function update(req: Request, res: Response) {
   const {
     title, excerpt, author_id,
-    categoryId, featuredImage, featuredImageCaption, featuredImageKey,
+    categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
     template, publishDate, status, body,
     featured, highlight, readTimeMinutes,
@@ -269,6 +303,11 @@ export async function update(req: Request, res: Response) {
     const categoryDoc = await findCategoryByIdOrThrow(categoryId);
     patch.categoryId = categoryDoc._id;
     patch.category = categoryDoc.title;
+  }
+  if (regionIds !== undefined) {
+    patch.regionIds = Array.isArray(regionIds) && regionIds.length > 0
+      ? await findActiveRegionIdsOrThrow(regionIds)
+      : [(await getGlobalRegion())._id];
   }
   if (featuredImage !== undefined) patch.featuredImage = featuredImage;
   if (featuredImageCaption !== undefined) patch.featuredImageCaption = featuredImageCaption;
@@ -318,6 +357,7 @@ export async function remove(req: Request, res: Response) {
   if (!article) return res.status(404).json({ error: 'Article not found' });
   // Drop the article's chunks from the RAG index (Phase 2 index hygiene).
   await purgeArticleChunks(String(article._id));
+  await ArticleSummary.deleteOne({ articleId: article._id });
   if (article.audioKey) {
     await deleteS3Object(article.audioKey).catch((err) => {
       console.warn('Failed to delete article audio from S3', err);

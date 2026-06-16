@@ -11,6 +11,7 @@ export interface ArticleDoc extends Document {
   authorId: string;
   category?: string;
   categoryId: mongoose.Types.ObjectId;
+  regionIds: mongoose.Types.ObjectId[];
   featuredImage: string;
   featuredImageCaption?: string;
   featuredImageKey?: string;
@@ -40,6 +41,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     authorId: { type: String, required: true, trim: true, index: true },
     category: { type: String, trim: true },
     categoryId: { type: Schema.Types.ObjectId, ref: 'Category', required: true, index: true },
+    regionIds: { type: [{ type: Schema.Types.ObjectId, ref: 'Region' }], default: [], index: true },
     featuredImage: { type: String, required: true, trim: true },
     featuredImageCaption: { type: String, trim: true },
     featuredImageKey: { type: String, trim: true },
@@ -56,6 +58,8 @@ const ArticleSchema = new Schema<ArticleDoc>(
   },
   { timestamps: true },
 );
+
+ArticleSchema.index({ regionIds: 1, status: 1, publishDate: -1 });
 
 const Article: Model<ArticleDoc> =
   mongoose.models.Article || mongoose.model<ArticleDoc>('Article', ArticleSchema);
