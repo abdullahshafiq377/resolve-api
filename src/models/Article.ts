@@ -28,6 +28,12 @@ export interface ArticleDoc extends Document {
   // (Phase 2). Lets the embedding pipeline skip re-embedding on metadata-only
   // edits / re-saves where the prose is unchanged. Absent until first embed.
   bodyHash?: string;
+  // True when this article was published from a community Research Request. Auto-set
+  // when a moderator links a published request to it; can be manually toggled.
+  fromResearchRequest: boolean;
+  // Bidirectional link back to the originating ResearchRequest (Option A). Lets the
+  // "From the community" badge link to the request and lets request hard-delete clear the flag.
+  researchRequestId?: mongoose.Types.ObjectId | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -53,6 +59,8 @@ const ArticleSchema = new Schema<ArticleDoc>(
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },
     bodyHash: { type: String },
+    fromResearchRequest: { type: Boolean, default: false },
+    researchRequestId: { type: Schema.Types.ObjectId, ref: 'ResearchRequest', default: null },
   },
   { timestamps: true },
 );

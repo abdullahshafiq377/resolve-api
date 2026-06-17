@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import Article from '../models/Article';
 import Category, { CategoryDoc } from '../models/Category';
 import Short from '../models/Short';
+import ResearchRequest from '../models/ResearchRequest';
 import { httpError } from '../utils/errors';
 
 export const DEFAULT_CATEGORIES = [
@@ -31,12 +32,29 @@ export async function findCategoryBySlug(slug: string): Promise<CategoryDoc | nu
   return Category.findOne({ slug });
 }
 
-export async function getCategoryUsage(categoryId: string): Promise<{ articleCount: number; shortCount: number }> {
-  const [articleCount, shortCount] = await Promise.all([
+export interface CategoryUsage {
+  articleCount: number;
+  shortCount: number;
+  // Only approved, non-rejected research requests lock a category (public visibility).
+  researchRequestCount: number;
+}
+
+export async function getCategoryUsage(categoryId: string): Promise<CategoryUsage> {
+  const [articleCount, shortCount, researchRequestCount] = await Promise.all([
     Article.countDocuments({ categoryId }),
     Short.countDocuments({ categoryId }),
+    ResearchRequest.countDocuments({
+      categoryId,
+      approvedAt: { $ne: null },
+      status: { $ne: 'rejected' },
+    }),
   ]);
-  return { articleCount, shortCount };
+  return { articleCount, shortCount, researchRequestCount };
+}
+
+// True when a category is referenced by any article, short, or approved research request.
+export function isCategoryInUse(usage: CategoryUsage): boolean {
+  return usage.articleCount + usage.shortCount + usage.researchRequestCount > 0;
 }
 
 export async function ensureDefaultCategories(): Promise<Map<string, CategoryDoc>> {

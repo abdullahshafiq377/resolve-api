@@ -10,6 +10,9 @@ import {
   type AuthorSummary,
 } from '../../services/users';
 import { httpError } from '../../utils/errors';
+import ResearchRequest from '../../models/ResearchRequest';
+import ResearchRequestVote from '../../models/ResearchRequestVote';
+import { invalidateBanCache } from '../../middleware/requireNotBanned';
 
 const router = express.Router();
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
@@ -30,6 +33,24 @@ async function assertNotPrivileged(targetId: string): Promise<void> {
   if (target.publicMetadata?.role === 'moderator') {
     throw httpError(400, 'cannot_modify_moderator');
   }
+}
+
+// Hard-delete a user's research-request votes and decrement the affected counters,
+// and silently delete their still-pending submissions. Used on ban + account delete
+// so a removed user leaves no orphan votes (Research Requests data-model contract).
+async function purgeUserResearchData(clerkUserId: string): Promise<void> {
+  const votes = await ResearchRequestVote.find({ userId: clerkUserId }).select('requestId');
+  const requestIds = [...new Set(votes.map((v) => String(v.requestId)))];
+
+  await ResearchRequestVote.deleteMany({ userId: clerkUserId });
+  for (const requestId of requestIds) {
+    await ResearchRequest.updateOne({ _id: requestId }, { $inc: { voteCount: -1 } });
+  }
+  // Clamp any counter that may have gone negative due to races.
+  await ResearchRequest.updateMany({ voteCount: { $lt: 0 } }, { $set: { voteCount: 0 } });
+
+  // Their never-approved submissions are removed silently.
+  await ResearchRequest.deleteMany({ submitterId: clerkUserId, approvedAt: null });
 }
 
 // GET /api/admin/users — list users (moderator-or-above)
@@ -116,6 +137,9 @@ router.post(
   wrap(async (req, res) => {
     await assertNotPrivileged(req.params.id);
     await clerk.users.banUser(req.params.id);
+    // Research Requests cascade: drop their votes (decrement counters) + pending requests.
+    await purgeUserResearchData(req.params.id);
+    invalidateBanCache(req.params.id);
     res.json({ ok: true });
   }),
 );
@@ -127,6 +151,7 @@ router.post(
   wrap(async (req, res) => {
     await assertNotPrivileged(req.params.id);
     await clerk.users.unbanUser(req.params.id);
+    invalidateBanCache(req.params.id);
     res.json({ ok: true });
   }),
 );
@@ -143,6 +168,8 @@ router.delete(
     // Cascade to the local mirror as a soft delete (§6) — preserves FK integrity
     // for articles authored by this user. (The user.deleted webhook also fires.)
     await softDeleteUser(req.params.id);
+    // Research Requests cascade: drop their votes + pending submissions.
+    await purgeUserResearchData(req.params.id);
     res.status(204).end();
   }),
 );
