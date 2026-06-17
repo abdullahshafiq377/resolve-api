@@ -3,6 +3,7 @@ import Category from '../models/Category';
 import type { CategoryDoc } from '../models/Category';
 import {
   getCategoryUsage,
+  isCategoryInUse,
   serializeCategory,
 } from '../services/categories';
 import { httpError } from '../utils/errors';
@@ -21,7 +22,7 @@ async function serializeAdminCategory(category: CategoryDoc | null) {
   return {
     ...serializeCategory(category),
     ...usage,
-    locked: usage.articleCount + usage.shortCount > 0,
+    locked: isCategoryInUse(usage),
   };
 }
 
@@ -53,7 +54,7 @@ export async function update(req: Request, res: Response) {
   const category = await Category.findById(req.params.id);
   if (!category) return res.status(404).json({ error: 'not_found' });
   const usage = await getCategoryUsage(String(category._id));
-  if (usage.articleCount + usage.shortCount > 0) throw httpError(400, 'category_in_use');
+  if (isCategoryInUse(usage)) throw httpError(409, 'category_in_use');
 
   const { title, active, order } = req.body;
   const patch: Record<string, unknown> = {};
@@ -73,7 +74,7 @@ export async function remove(req: Request, res: Response) {
   const category = await Category.findById(req.params.id);
   if (!category) return res.status(404).json({ error: 'not_found' });
   const usage = await getCategoryUsage(String(category._id));
-  if (usage.articleCount + usage.shortCount > 0) throw httpError(400, 'category_in_use');
+  if (isCategoryInUse(usage)) throw httpError(409, 'category_in_use');
   await category.deleteOne();
   res.status(204).send();
 }

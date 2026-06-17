@@ -11,6 +11,7 @@
     "migrate:article-authors": "tsx src/scripts/migrateArticleAuthors.ts",
     "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts",
     "migrate:categories": "tsx src/scripts/migrateCategories.ts",
+    "migrate:research-requests": "tsx src/scripts/researchRequests/migrate.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts"
@@ -30,6 +31,8 @@
     "mongodb": "^7.2.0",
     "mongoose": "^9.6.2",
     "morgan": "^1.10.1",
+    "resend": "^4.8.0",
+    "socket.io": "^4.8.3",
     "svix": "^1.95.1"
   },
   "devDependencies": {

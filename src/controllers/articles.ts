@@ -13,6 +13,7 @@ import {
 } from '../services/users';
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categories';
+import ResearchRequest from '../models/ResearchRequest';
 
 const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;

@@ -3,6 +3,7 @@ import articlesRouter from './articles';
 import shortsRouter from './shorts';
 import usersRouter from './users';
 import categoriesRouter from './categories';
+import researchRequestsRouter from './researchRequests';
 
 const router = express.Router();
 
@@ -10,5 +11,6 @@ router.use('/articles', articlesRouter);
 router.use('/shorts', shortsRouter);
 router.use('/categories', categoriesRouter);
 router.use('/users', usersRouter);
+router.use('/research-requests', researchRequestsRouter);
 
 export default router;
