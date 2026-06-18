@@ -44,6 +44,9 @@ export interface ResearchRequestDoc extends Document {
   linkedArticleSlug: string | null;
   // Denormalised counter maintained transactionally by the vote endpoints.
   voteCount: number;
+  // Denormalised count of visible comments. Kept in sync on comment create/delete
+  // transitions to/from `visible`; repairable via `comments:resync-counts`.
+  commentCount: number;
   // Audit fields — all Clerk user IDs.
   submittedAt: Date;
   submittedBy: string;
@@ -73,6 +76,7 @@ const ResearchRequestSchema = new Schema<ResearchRequestDoc>(
     linkedArticleId: { type: Schema.Types.ObjectId, ref: 'Article', default: null },
     linkedArticleSlug: { type: String, default: null, trim: true },
     voteCount: { type: Number, default: 0, min: 0 },
+    commentCount: { type: Number, default: 0, min: 0 },
     submittedAt: { type: Date, default: Date.now },
     submittedBy: { type: String, required: true, trim: true },
     moderatedBy: { type: String, default: null },

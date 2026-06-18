@@ -14,6 +14,10 @@ export interface FireInput {
   userId: string;
   type: NotificationType;
   requestId: Types.ObjectId | null;
+  // Comment-feature references (null for research-request notifications).
+  commentId?: Types.ObjectId | null;
+  parentType?: 'article' | 'poll' | 'researchRequest' | null;
+  parentId?: Types.ObjectId | null;
   title: string;
   body: string;
   link: string;
@@ -59,6 +63,9 @@ export async function fire(input: FireInput) {
       userId: input.userId,
       type: input.type,
       requestId: input.requestId,
+      commentId: input.commentId ?? null,
+      parentType: input.parentType ?? null,
+      parentId: input.parentId ?? null,
       title: input.title,
       body: input.body,
       link: input.link,
@@ -74,6 +81,7 @@ export async function fire(input: FireInput) {
     body: row.body,
     link: row.link,
     requestId: input.requestId ? String(input.requestId) : null,
+    commentId: input.commentId ? String(input.commentId) : null,
     createdAt: row.createdAt.toISOString(),
   });
 

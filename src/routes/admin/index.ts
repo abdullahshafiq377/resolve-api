@@ -5,6 +5,7 @@ import usersRouter from './users';
 import categoriesRouter from './categories';
 import researchRequestsRouter from './researchRequests';
 import pollsRouter from './polls';
+import commentsRouter from './comments';
 
 const router = express.Router();
 
@@ -14,5 +15,6 @@ router.use('/categories', categoriesRouter);
 router.use('/users', usersRouter);
 router.use('/research-requests', researchRequestsRouter);
 router.use('/polls', pollsRouter);
+router.use('/comments', commentsRouter);
 
 export default router;

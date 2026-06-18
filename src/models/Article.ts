@@ -34,6 +34,9 @@ export interface ArticleDoc extends Document {
   // Bidirectional link back to the originating ResearchRequest (Option A). Lets the
   // "From the community" badge link to the request and lets request hard-delete clear the flag.
   researchRequestId?: mongoose.Types.ObjectId | null;
+  // Denormalised count of visible comments. Kept in sync on comment create/delete
+  // transitions to/from `visible`; repairable via `comments:resync-counts`.
+  commentCount: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +64,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     bodyHash: { type: String },
     fromResearchRequest: { type: Boolean, default: false },
     researchRequestId: { type: Schema.Types.ObjectId, ref: 'ResearchRequest', default: null },
+    commentCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );

@@ -7,6 +7,7 @@ export interface NotificationPayload {
   body: string;
   link: string;
   requestId: string | null;
+  commentId?: string | null;
   createdAt: string;
 }
 
