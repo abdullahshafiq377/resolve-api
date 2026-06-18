@@ -14,6 +14,7 @@ import {
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categories';
 import ResearchRequest from '../models/ResearchRequest';
+import { sanitizePublicPulseBlocks } from '../services/publicPulse/body';
 
 const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;
@@ -205,13 +206,15 @@ export async function create(req: Request, res: Response) {
 
   const slug = await generateUniqueSlug(title, Article);
 
+  const sanitizedBody = await sanitizePublicPulseBlocks(body);
+
   const article = await Article.create({
     title, slug, excerpt, authorId, categoryId: categoryDoc._id, category: categoryDoc.title,
     featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl: audioUrl || undefined, audioKey: audioKey || undefined,
     template,
     publishDate: new Date(publishDate),
-    status: nextStatus, body,
+    status: nextStatus, body: sanitizedBody,
     featured: nextFeatured, highlight: nextHighlight,
     readTimeMinutes: readTime,
   });
@@ -285,7 +288,7 @@ export async function update(req: Request, res: Response) {
   if (template !== undefined) patch.template = template;
   if (publishDate !== undefined) patch.publishDate = new Date(publishDate);
   if (status !== undefined) patch.status = nextStatus;
-  if (body !== undefined) patch.body = body;
+  if (body !== undefined) patch.body = await sanitizePublicPulseBlocks(body);
   if (featured !== undefined || status !== undefined || shouldClearDraftFeatured) patch.featured = nextFeatured;
   if (highlight !== undefined || status !== undefined || shouldClearDraftHighlight) patch.highlight = nextHighlight;
   if (readTimeMinutes !== undefined) patch.readTimeMinutes = readTimeMinutes ?? null;
