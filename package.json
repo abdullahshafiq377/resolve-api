@@ -14,6 +14,9 @@
     "migrate:research-requests": "tsx src/scripts/researchRequests/migrate.ts",
     "resync:poll-counts": "tsx src/scripts/resyncPollCounts.ts",
     "public-pulse:transitions": "tsx src/scripts/runPublicPulseTransitions.ts",
+    "comments:ban-sweeper": "tsx src/scripts/runCommentBanSweeper.ts",
+    "comments:seed-blocked-keywords": "tsx src/scripts/seedBlockedKeywords.ts",
+    "comments:resync-counts": "tsx src/scripts/resyncCommentCounts.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts"

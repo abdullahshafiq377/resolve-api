@@ -13,6 +13,7 @@ import { httpError } from '../../utils/errors';
 import ResearchRequest from '../../models/ResearchRequest';
 import ResearchRequestVote from '../../models/ResearchRequestVote';
 import { invalidateBanCache } from '../../middleware/requireNotBanned';
+import { userHistory, postWarning, postBan, postLiftBan } from '../../controllers/admin/comments';
 
 const router = express.Router();
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
@@ -173,5 +174,12 @@ router.delete(
     res.status(204).end();
   }),
 );
+
+// GET /api/admin/users/:userId/comment-history — interleaved comment moderation history.
+router.get('/:userId/comment-history', requireModerator, wrap(userHistory));
+// Comment moderation actions on a user (moderator-or-above).
+router.post('/:userId/warning', requireModerator, wrap(postWarning));
+router.post('/:userId/comment-ban', requireModerator, wrap(postBan));
+router.post('/:userId/comment-ban/:banId/lift', requireModerator, wrap(postLiftBan));
 
 export default router;
