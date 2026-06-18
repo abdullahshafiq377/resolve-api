@@ -12,6 +12,8 @@
     "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts",
     "migrate:categories": "tsx src/scripts/migrateCategories.ts",
     "migrate:research-requests": "tsx src/scripts/researchRequests/migrate.ts",
+    "resync:poll-counts": "tsx src/scripts/resyncPollCounts.ts",
+    "public-pulse:transitions": "tsx src/scripts/runPublicPulseTransitions.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts"

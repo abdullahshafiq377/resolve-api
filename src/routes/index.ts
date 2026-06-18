@@ -5,6 +5,7 @@ import chatRouter from './chat';
 import adminRouter from './admin';
 import categoriesRouter from './categories';
 import researchRequestsRouter from './researchRequests';
+import publicPulseRouter from './publicPulse';
 import accountRouter from './account';
 import notificationsRouter from './notifications';
 
@@ -19,6 +20,7 @@ router.use('/shorts', shortsRouter);
 router.use('/categories', categoriesRouter);
 router.use('/chat', chatRouter);
 router.use('/research-requests', researchRequestsRouter);
+router.use('/public-pulse', publicPulseRouter);
 router.use('/account', accountRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/admin', adminRouter);
