@@ -1,7 +1,14 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { archive, getById, getPreferences, latest, putPreferences } from '../controllers/brief';
-import { requirePremium, requireSignedIn } from '../middleware/auth';
+import {
+  archive,
+  getById,
+  getGeneric,
+  getPreferences,
+  latest,
+  putPreferences,
+} from '../controllers/brief';
+import { requireSignedIn, requireStandard } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -12,8 +19,10 @@ const wrap =
 
 router.get('/preferences', requireSignedIn, wrap(getPreferences));
 router.put('/preferences', requireSignedIn, wrap(putPreferences));
-router.get('/latest', requirePremium, wrap(latest));
-router.get('/archive', requirePremium, wrap(archive));
-router.get('/:id', requirePremium, wrap(getById));
+// Generic free brief: any signed-in user (Free included). Must precede '/:id'.
+router.get('/generic', requireSignedIn, wrap(getGeneric));
+router.get('/latest', requireStandard, wrap(latest));
+router.get('/archive', requireStandard, wrap(archive));
+router.get('/:id', requireStandard, wrap(getById));
 
 export default router;

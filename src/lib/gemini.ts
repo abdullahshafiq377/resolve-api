@@ -5,6 +5,7 @@ import {
   type SafetySetting,
   type Content,
 } from '@google/genai';
+import type { PlanTier } from '../middleware/auth';
 
 // ── Config (env-driven; model IDs never hardcoded) ──────────────────────────
 const API_KEY = process.env.GEMINI_API_KEY;
@@ -49,13 +50,36 @@ export const DEFAULT_SAFETY_SETTINGS: SafetySetting[] = [
   },
 ];
 
-// Map a stable product key (NOT the UI label) -> provider model id (env). Phase 3.
-// Non-premium, or an unknown/missing key, always falls back to the default model.
-export function resolveModel(requested: string | undefined, premium: boolean): string {
-  if (!premium) return CHAT_MODEL;
-  if (requested === 'thinking') return CHAT_MODEL_THINKING;
-  if (requested === 'pro') return CHAT_MODEL_PRO;
-  return CHAT_MODEL;
+// Stable product model keys (NOT the UI labels). Each maps to a provider model
+// id (env) and has a minimum tier; tiers unlock models cumulatively:
+//   Free → velo · Standard → velo, core · Premium → velo, core, max
+export type ChatModelKey = 'velo' | 'core' | 'max';
+
+const MODEL_BY_KEY: Record<ChatModelKey, string> = {
+  velo: CHAT_MODEL,
+  core: CHAT_MODEL_THINKING,
+  max: CHAT_MODEL_PRO,
+};
+
+// Highest model key each tier may use (inclusive of all lower keys).
+const MAX_MODEL_FOR_TIER: Record<PlanTier, ChatModelKey> = {
+  free: 'velo',
+  standard: 'core',
+  premium: 'max',
+};
+
+const MODEL_ORDER: ChatModelKey[] = ['velo', 'core', 'max'];
+
+// Resolve the requested model to a provider id, clamped to the tier's ceiling.
+// Server-authoritative: an out-of-tier or unknown/missing key falls back to the
+// best model the tier allows (never trust the client).
+export function resolveModel(requested: string | undefined, tier: PlanTier): string {
+  const ceiling = MAX_MODEL_FOR_TIER[tier];
+  const ceilingIdx = MODEL_ORDER.indexOf(ceiling);
+  const requestedIdx = MODEL_ORDER.indexOf(requested as ChatModelKey);
+  const key: ChatModelKey =
+    requestedIdx >= 0 && requestedIdx <= ceilingIdx ? (requested as ChatModelKey) : ceiling;
+  return MODEL_BY_KEY[key];
 }
 
 // Gemini uses the role 'model' for assistant turns.

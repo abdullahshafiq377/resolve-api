@@ -21,6 +21,7 @@ export interface ArticleDoc extends Document {
   publishDate: Date;
   featured: boolean;
   highlight: boolean;
+  topStories: boolean;
   status: (typeof STATUSES)[number];
   readTimeMinutes: number | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -51,6 +52,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     publishDate: { type: Date, required: true },
     featured: { type: Boolean, default: false },
     highlight: { type: Boolean, default: false },
+    topStories: { type: Boolean, default: false },
     status: { type: String, enum: STATUSES, default: 'draft' },
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },

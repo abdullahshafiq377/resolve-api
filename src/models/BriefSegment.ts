@@ -23,10 +23,16 @@ export interface BriefSegmentDoc extends Document {
   articleWindowStart: Date;
   articleWindowEnd: Date;
   sourceArticleIds: mongoose.Types.ObjectId[];
+  // The single shared "generic" free-tier brief for a day (one per briefDate via
+  // a sentinel signatureHash). Generic segments have no BriefRecipients.
+  isGeneric: boolean;
   status: BriefSegmentStatus;
   headlineSummary: string;
+  title: string | null;
+  summary: string | null;
   stories: BriefStory[];
   editorialNote: string | null;
+  editorialNoteAuthor: string | null;
   generationStatus: BriefGenerationStatus;
   generationError: string | null;
   generatedAt: Date | null;
@@ -62,10 +68,14 @@ const BriefSegmentSchema = new Schema<BriefSegmentDoc>(
     articleWindowStart: { type: Date, required: true },
     articleWindowEnd: { type: Date, required: true },
     sourceArticleIds: [{ type: Schema.Types.ObjectId, ref: 'Article' }],
+    isGeneric: { type: Boolean, default: false, index: true },
     status: { type: String, enum: BRIEF_SEGMENT_STATUSES, default: 'draft', index: true },
     headlineSummary: { type: String, required: true, trim: true },
+    title: { type: String, default: null, trim: true },
+    summary: { type: String, default: null, trim: true },
     stories: { type: [BriefStorySchema], default: [] },
     editorialNote: { type: String, default: null, trim: true },
+    editorialNoteAuthor: { type: String, default: null, trim: true },
     generationStatus: { type: String, enum: BRIEF_GENERATION_STATUSES, default: 'generated' },
     generationError: { type: String, default: null },
     generatedAt: { type: Date, default: null },

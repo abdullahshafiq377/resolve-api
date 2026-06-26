@@ -11,7 +11,7 @@ import { extractPlainText } from '../lib/articleText';
 import { generateText } from '../lib/gemini';
 import { httpError } from '../utils/errors';
 import { defaultArticleWindow, getPakistanDateString } from './briefDates';
-import { getBriefPremiumEligibility } from './briefPremium';
+import { getBriefEligibility } from './briefPremium';
 import { getGlobalRegion, GLOBAL_REGION_SLUG } from './regions';
 
 const SIGNATURE_VERSION = 1;
@@ -77,7 +77,7 @@ async function articleQuery(
   return Article.find(filter).sort({ publishDate: -1, createdAt: -1 }).limit(7);
 }
 
-async function selectArticles(
+export async function selectArticles(
   categoryIds: string[],
   regionIds: string[],
   start: Date,
@@ -125,7 +125,7 @@ function parseGeminiJson(raw: string): unknown {
   return JSON.parse(trimmed);
 }
 
-async function generateDraft(
+export async function generateDraft(
   briefDate: string,
   categoryIds: string[],
   regionIds: string[],
@@ -293,7 +293,7 @@ export async function processBriefGenerationBatch(input: {
         skipped += 1;
         continue;
       }
-      const eligibility = await getBriefPremiumEligibility(preference.clerkUserId);
+      const eligibility = await getBriefEligibility(preference.clerkUserId);
       if (!eligibility.eligible) {
         if (eligibility.reason === 'clerk_error') failed += 1;
         else skipped += 1;

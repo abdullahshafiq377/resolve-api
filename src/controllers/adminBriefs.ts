@@ -116,10 +116,25 @@ export async function update(req: Request, res: Response) {
     }
     segment.headlineSummary = req.body.headlineSummary.trim();
   }
+  if (req.body.title !== undefined) {
+    segment.title = typeof req.body.title === 'string' && req.body.title.trim()
+      ? req.body.title.trim()
+      : null;
+  }
+  if (req.body.summary !== undefined) {
+    segment.summary = typeof req.body.summary === 'string' && req.body.summary.trim()
+      ? req.body.summary.trim()
+      : null;
+  }
   if (req.body.stories !== undefined) segment.stories = normalizeStories(req.body.stories);
   if (req.body.editorialNote !== undefined) {
     segment.editorialNote = typeof req.body.editorialNote === 'string' && req.body.editorialNote.trim()
       ? req.body.editorialNote.trim()
+      : null;
+  }
+  if (req.body.editorialNoteAuthor !== undefined) {
+    segment.editorialNoteAuthor = typeof req.body.editorialNoteAuthor === 'string' && req.body.editorialNoteAuthor.trim()
+      ? req.body.editorialNoteAuthor.trim()
       : null;
   }
   segment.generationStatus = 'manual';

@@ -26,8 +26,22 @@ interface RoleClaims {
   metadata?: { role?: Role };
 }
 
-// Slug used by Clerk's plan claim; the `user:` namespace prefix is required.
-const PREMIUM_PLAN = 'user:premium_plan';
+// Plan tiers are ordered: free < standard < premium. Slugs used by Clerk's plan
+// claim require the `user:` namespace prefix. The legacy `premium_plan` slug is
+// still honoured as premium so subscribers from the 2-plan era keep access until
+// Clerk migrates them onto the new `premium` plan.
+export type PlanTier = 'free' | 'standard' | 'premium';
+
+const TIER_ORDER: PlanTier[] = ['free', 'standard', 'premium'];
+
+const STANDARD_PLAN = 'user:standard';
+const PREMIUM_PLAN = 'user:premium';
+const LEGACY_PREMIUM_PLAN = 'user:premium_plan';
+
+// True if `tier` is at least `min` in the free < standard < premium ordering.
+export function tierAtLeast(tier: PlanTier, min: PlanTier): boolean {
+  return TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(min);
+}
 
 export function isSuperAdmin(userId: string | null | undefined): boolean {
   return !!userId && !!SUPER_ADMIN_USER_ID && userId === SUPER_ADMIN_USER_ID;
@@ -60,21 +74,48 @@ export interface PremiumAuth {
   has?: (params: { plan: string }) => boolean;
 }
 
-// Authoritative premium check (overview §3): Clerk plan `user:premium_plan`,
-// PLUS moderator / super admin. This is the single server-side source of truth —
-// the frontend `useIsPremium()` is for UI only and is never trusted. Pass the
-// result of getAuth(req). Mirrors requirePremium's logic without short-circuiting
-// to an HTTP response, so handlers (e.g. chat) can branch on the boolean.
-export function isPremium(auth: PremiumAuth): boolean {
+// Authoritative tier resolution (overview §3): read live from Clerk's plan claim
+// via has(), PLUS moderator / super admin who inherit the top tier. This is the
+// single server-side source of truth — the frontend `usePlanTier()` is for UI
+// only and is never trusted. Pass the result of getAuth(req).
+export function getTier(auth: PremiumAuth): PlanTier {
   const { userId, sessionClaims, has } = auth;
-  if (!userId) return false;
-  if (isModerator(userId, sessionClaims)) return true;
-  return !!(has && has({ plan: PREMIUM_PLAN }));
+  if (!userId) return 'free';
+  if (isModerator(userId, sessionClaims)) return 'premium';
+  if (has && (has({ plan: PREMIUM_PLAN }) || has({ plan: LEGACY_PREMIUM_PLAN }))) {
+    return 'premium';
+  }
+  if (has && has({ plan: STANDARD_PLAN })) return 'standard';
+  return 'free';
 }
 
-// Premium OR moderator OR super admin (scaffold for future paid endpoints).
-// Premium is checked against Clerk's live plan claim via has() — no metadata
-// mirror, no DB lookup. Moderators/super admin pass implicitly.
+// Premium-only check (e.g. the Max model). Moderators/super admin pass.
+export function isPremium(auth: PremiumAuth): boolean {
+  return getTier(auth) === 'premium';
+}
+
+// Any paid tier (standard or premium). Used by Standard-level features such as
+// the Resolve Brief and persistent chat history.
+export function hasStandard(auth: PremiumAuth): boolean {
+  return tierAtLeast(getTier(auth), 'standard');
+}
+
+// Require at least Standard (any paid tier). 401 if signed out, 403 if Free.
+export function requireStandard(req: Request, res: Response, next: NextFunction): void {
+  const { userId } = getAuth(req);
+  if (!userId) {
+    res.status(401).json({ error: 'unauthenticated' });
+    return;
+  }
+  if (hasStandard(getAuth(req))) {
+    next();
+    return;
+  }
+  res.status(403).json({ error: 'forbidden' });
+}
+
+// Premium OR moderator OR super admin. Premium is checked against Clerk's live
+// plan claim via has() — no metadata mirror, no DB lookup.
 export function requirePremium(req: Request, res: Response, next: NextFunction): void {
   const { userId } = getAuth(req);
   if (!userId) {
