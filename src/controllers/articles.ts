@@ -228,7 +228,7 @@ export async function create(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, publishDate, status, body,
+    template, status, body,
     featured, highlight, topStories, readTimeMinutes,
   } = req.body;
 
@@ -254,7 +254,8 @@ export async function create(req: Request, res: Response) {
     featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl: audioUrl || undefined, audioKey: audioKey || undefined,
     template,
-    publishDate: new Date(publishDate),
+    // Publish date is system-managed: stamped when published, absent for drafts.
+    publishDate: nextStatus === 'published' ? new Date() : undefined,
     status: nextStatus, body,
     featured: nextFeatured, highlight: nextHighlight, topStories: nextTopStories,
     readTimeMinutes: readTime,
@@ -274,7 +275,7 @@ export async function update(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, publishDate, status, body,
+    template, status, body,
     featured, highlight, topStories, readTimeMinutes,
   } = req.body;
 
@@ -282,6 +283,7 @@ export async function update(req: Request, res: Response) {
   if (!current) return res.status(404).json({ error: 'Article not found' });
 
   const nextStatus = normalizeStatus(status, current.status);
+  const wasPublished = current.status === 'published';
   const currentFeatured = current.status === 'published' ? current.featured : false;
   const currentHighlight = current.status === 'published' ? current.highlight : false;
   const nextFeatured =
@@ -337,7 +339,14 @@ export async function update(req: Request, res: Response) {
     else patch.audioKey = audioKey;
   }
   if (template !== undefined) patch.template = template;
-  if (publishDate !== undefined) patch.publishDate = new Date(publishDate);
+  // Publish date is system-managed by status: stamped the moment a draft goes
+  // live, and cleared whenever the article is a draft (even if it was published
+  // before). A published article that stays published keeps its original date.
+  if (nextStatus === 'draft') {
+    if (current.publishDate) unset.publishDate = 1;
+  } else if (!wasPublished) {
+    patch.publishDate = new Date();
+  }
   if (status !== undefined) patch.status = nextStatus;
   if (body !== undefined) patch.body = body;
   if (featured !== undefined || status !== undefined || shouldClearDraftFeatured) patch.featured = nextFeatured;

@@ -8,7 +8,7 @@ import {
   latest,
   putPreferences,
 } from '../controllers/brief';
-import { requireSignedIn, requireStandard } from '../middleware/auth';
+import { requirePremium, requireSignedIn, requireStandard } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -22,7 +22,9 @@ router.put('/preferences', requireSignedIn, wrap(putPreferences));
 // Generic free brief: any signed-in user (Free included). Must precede '/:id'.
 router.get('/generic', requireSignedIn, wrap(getGeneric));
 router.get('/latest', requireStandard, wrap(latest));
-router.get('/archive', requireStandard, wrap(archive));
-router.get('/:id', requireStandard, wrap(getById));
+// Archive + single past edition are Premium-only (doc §5). Standard gets the
+// daily personalised brief but not the back catalogue.
+router.get('/archive', requirePremium, wrap(archive));
+router.get('/:id', requirePremium, wrap(getById));
 
 export default router;

@@ -18,7 +18,9 @@ export interface ArticleDoc extends Document {
   audioUrl?: string;
   audioKey?: string;
   template: (typeof TEMPLATES)[number];
-  publishDate: Date;
+  // Set only while the article is published. Cleared on revert to draft so a
+  // draft never carries a stale publish date (§ articles statuses).
+  publishDate?: Date;
   featured: boolean;
   highlight: boolean;
   topStories: boolean;
@@ -49,7 +51,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     audioUrl: { type: String, trim: true },
     audioKey: { type: String, trim: true },
     template: { type: String, enum: TEMPLATES, required: true },
-    publishDate: { type: Date, required: true },
+    publishDate: { type: Date },
     featured: { type: Boolean, default: false },
     highlight: { type: Boolean, default: false },
     topStories: { type: Boolean, default: false },

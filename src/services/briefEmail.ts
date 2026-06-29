@@ -39,12 +39,28 @@ function buildBriefEmailHtml(segment: BriefSegmentDoc): string {
     ? `<p style="border-top:1px solid #e5e7eb;margin-top:24px;padding-top:16px;color:#374151;">${escapeHtml(segment.editorialNote)}</p>`
     : '';
 
+  // The email is the morning edition: lead with the day's title + the full
+  // synthesis summary (paragraph-split), then the "Go Deeper" stories. Fall back
+  // to the short headlineSummary hook when the synthesis is absent.
+  const title = segment.title
+    ? `<h2 style="font-size:24px;line-height:1.2;margin:0 0 12px;">${escapeHtml(segment.title)}</h2>`
+    : '';
+  const summaryBody = segment.summary
+    ? segment.summary
+        .split(/\n{2,}/)
+        .map((para) => para.trim())
+        .filter(Boolean)
+        .map((para) => `<p style="font-size:17px;line-height:1.6;margin:0 0 16px;">${escapeHtml(para)}</p>`)
+        .join('')
+    : `<p style="font-size:18px;line-height:1.55;margin:0 0 24px;">${escapeHtml(segment.headlineSummary)}</p>`;
+
   return `
     <div style="font-family:Georgia,'Times New Roman',serif;max-width:640px;margin:0 auto;padding:24px;color:#111827;">
       <p style="font-family:Arial,sans-serif;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#92400e;">The Resolve Brief</p>
       <h1 style="font-size:30px;line-height:1.15;margin:0 0 8px;">The Resolve Brief</h1>
       <p style="font-family:Arial,sans-serif;color:#6b7280;margin:0 0 20px;">${escapeHtml(segment.briefDate)}</p>
-      <p style="font-size:18px;line-height:1.55;margin:0 0 24px;">${escapeHtml(segment.headlineSummary)}</p>
+      ${title}
+      <div style="margin:0 0 24px;">${summaryBody}</div>
       <ol style="padding-left:22px;margin:0;">${stories}</ol>
       ${note}
       <p style="font-family:Arial,sans-serif;font-size:13px;color:#6b7280;margin-top:28px;">

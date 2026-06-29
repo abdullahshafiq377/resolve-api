@@ -69,10 +69,13 @@ Guidelines:
 - Prefer short paragraphs. Do not use markdown headings.`;
 
 function articleContextPrompt(
-  article: { title: string; category: string; publishDate: Date },
+  article: { title: string; category: string; publishDate?: Date },
   bodyText: string,
 ): string {
-  const meta = `Title: ${article.title}\nCategory: ${article.category}\nPublished: ${article.publishDate.toISOString().slice(0, 10)}`;
+  const published = article.publishDate
+    ? `\nPublished: ${article.publishDate.toISOString().slice(0, 10)}`
+    : '';
+  const meta = `Title: ${article.title}\nCategory: ${article.category}${published}`;
   return `${BASE_SYSTEM_PROMPT}
 
 You are answering questions about ONE specific Resolve article. Base your answers on the article's text below. If the answer is not in the article, say the article does not cover it (you may add brief general context, clearly noting it goes beyond the article).
@@ -209,7 +212,7 @@ export async function postChat(req: Request, res: Response): Promise<void> {
 
   // Build the system prompt / grounding context.
   let systemPrompt = BASE_SYSTEM_PROMPT;
-  let articleDoc: { title: string; category: string; publishDate: Date } | null = null;
+  let articleDoc: { title: string; category: string; publishDate?: Date } | null = null;
 
   if (scope === 'article') {
     if (!mongoose.isValidObjectId(articleId)) {

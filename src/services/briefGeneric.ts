@@ -61,6 +61,8 @@ export async function generateGenericBrief(
     isGeneric: true,
     status: 'draft',
     headlineSummary: draft.headlineSummary,
+    title: draft.title,
+    summary: draft.summary,
     stories: draft.stories,
     editorialNote: draft.editorialNote,
     generationStatus: draft.generationStatus,

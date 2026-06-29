@@ -14,7 +14,10 @@ import { defaultArticleWindow, getPakistanDateString } from './briefDates';
 import { getBriefEligibility } from './briefPremium';
 import { getGlobalRegion, GLOBAL_REGION_SLUG } from './regions';
 
-const SIGNATURE_VERSION = 1;
+// v2: the article window is no longer part of the signature. Segment identity is
+// (briefDate + categories + regions) so a same-day re-generation with a refreshed
+// window updates the same draft segment instead of orphaning it behind a new hash.
+const SIGNATURE_VERSION = 2;
 const DEFAULT_BATCH_SIZE = Math.max(1, Number(process.env.RESOLVE_BRIEF_BATCH_SIZE) || 100);
 const LOCK_MS = 10 * 60 * 1000;
 
@@ -27,6 +30,8 @@ interface Candidate {
 
 interface SegmentDraft {
   headlineSummary: string;
+  title: string | null;
+  summary: string | null;
   stories: BriefStory[];
   editorialNote: string | null;
   generationStatus: 'generated' | 'failed' | 'manual';
@@ -41,16 +46,12 @@ function signatureHash(input: {
   briefDate: string;
   categoryIds: string[];
   regionIds: string[];
-  articleWindowStart: Date;
-  articleWindowEnd: Date;
 }): string {
   const json = JSON.stringify({
     version: SIGNATURE_VERSION,
     briefDate: input.briefDate,
     categoryIds: input.categoryIds,
     regionIds: input.regionIds,
-    articleWindowStart: input.articleWindowStart.toISOString(),
-    articleWindowEnd: input.articleWindowEnd.toISOString(),
   });
   return crypto.createHash('sha256').update(json).digest('hex');
 }
@@ -107,6 +108,8 @@ function fallbackDraft(articles: ArticleDoc[], warning: string | null): SegmentD
       articles.length > 0
         ? `Today's Brief follows ${articles.length} key ${articles.length === 1 ? 'story' : 'stories'} from Resolve's latest reporting.`
         : 'No matching Resolve stories were available for this Brief segment.',
+    title: null,
+    summary: null,
     stories: articles.slice(0, 7).map((article, index) => ({
       articleId: article._id as mongoose.Types.ObjectId,
       headline: article.title,
@@ -144,7 +147,7 @@ export async function generateDraft(
       title: article.title,
       excerpt: article.excerpt,
       url: articleUrl(article),
-      publishDate: article.publishDate.toISOString(),
+      publishDate: (article.publishDate ?? article.createdAt).toISOString(),
       bodyExcerpt: extractPlainText(article.body).slice(0, 1800),
     }));
     const raw = await generateText({
@@ -155,9 +158,16 @@ export async function generateDraft(
         categories: categories.map((category) => category.title),
         regions: regions.map((region) => region.slug === GLOBAL_REGION_SLUG ? 'Global' : region.title),
         instruction:
-          'Create a 3-5 minute daily brief with a 1-2 sentence headlineSummary, 5-7 stories when supplied, and an optional editorialNote.',
+          'Create a 3-5 minute daily morning brief: an original synthesis that orients the reader. ' +
+          'Produce a short editorial `title` (the headline of the day, ~6-12 words), a 1-2 sentence `headlineSummary` hook, ' +
+          'and a multi-paragraph `summary` that (1) recaps what has happened since yesterday and overnight, ' +
+          '(2) explains why it matters and connects the threads of the developing story, and ' +
+          '(3) looks ahead to what is scheduled or expected, framed as "expected", "due", or "watch for". ' +
+          'Also include 5-7 stories when supplied, and an optional editorialNote.',
         requiredShape: {
+          title: 'string',
           headlineSummary: 'string',
+          summary: 'string (multiple paragraphs separated by blank lines)',
           stories: [{ articleId: 'string', headline: 'string', summary: 'string', url: 'string' }],
           editorialNote: 'string or null',
         },
@@ -165,7 +175,9 @@ export async function generateDraft(
       }),
     });
     const parsed = parseGeminiJson(raw) as {
+      title?: unknown;
       headlineSummary?: unknown;
+      summary?: unknown;
       stories?: { articleId?: unknown; headline?: unknown; summary?: unknown; url?: unknown }[];
       editorialNote?: unknown;
     };
@@ -190,6 +202,8 @@ export async function generateDraft(
     if (stories.length === 0) throw new Error('no_valid_gemini_stories');
     return {
       headlineSummary: parsed.headlineSummary.trim(),
+      title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : null,
+      summary: typeof parsed.summary === 'string' && parsed.summary.trim() ? parsed.summary.trim() : null,
       stories,
       editorialNote: typeof parsed.editorialNote === 'string' ? parsed.editorialNote.trim() : null,
       generationStatus: warning ? 'failed' : 'generated',
@@ -231,21 +245,35 @@ async function acquireRun(briefDate: string) {
 
   const lockToken = crypto.randomUUID();
   const lockUntil = new Date(now.getTime() + LOCK_MS);
+  // Acquire the lock on any run not currently held by a live worker. We no longer
+  // exclude `completed` runs: clicking Generate again is a deliberate re-run.
   const run = await BriefGenerationRun.findOneAndUpdate(
     {
       briefDate,
-      status: { $ne: 'completed' },
       $or: [{ lockUntil: null }, { lockUntil: { $lte: now } }, { lockToken: null }],
     },
-    { $set: { lockToken, lockUntil, status: 'running' } },
+    { $set: { lockToken, lockUntil } },
     { new: true },
   );
-  if (!run) {
-    const existing = await BriefGenerationRun.findOne({ briefDate });
-    if (existing?.status === 'completed') return { run: existing, lockToken: null };
-    throw httpError(423, 'brief_generation_locked');
+  if (!run) throw httpError(423, 'brief_generation_locked');
+
+  // A finished (completed/failed) run is reopened as a fresh pass: refresh the
+  // article window to now and rewind the keyset cursor so newly-published
+  // articles — and any new eligible users — are picked up. A run that is still
+  // mid-batch (running, lock just expired) keeps its window/cursor so pagination
+  // stays consistent.
+  let refreshed = false;
+  if (run.status === 'completed' || run.status === 'failed') {
+    run.articleWindowStart = window.start;
+    run.articleWindowEnd = window.end;
+    run.lastPreferenceId = null;
+    run.status = 'running';
+    run.completedAt = null;
+    run.lastError = null;
+    await run.save();
+    refreshed = true;
   }
-  return { run, lockToken };
+  return { run, lockToken, refreshed };
 }
 
 export async function processBriefGenerationBatch(input: {
@@ -257,13 +285,7 @@ export async function processBriefGenerationBatch(input: {
 }> {
   const briefDate = input.briefDate || getPakistanDateString();
   const batchSize = Math.max(1, Math.min(500, input.batchSize || DEFAULT_BATCH_SIZE));
-  const { run, lockToken } = await acquireRun(briefDate);
-  if (!lockToken) {
-    return {
-      run: run.toObject() as unknown as Record<string, unknown>,
-      batch: { processed: 0, eligible: 0, skipped: 0, failed: 0, hasMore: false },
-    };
-  }
+  const { run, lockToken, refreshed } = await acquireRun(briefDate);
 
   let processed = 0;
   let eligible = 0;
@@ -285,11 +307,11 @@ export async function processBriefGenerationBatch(input: {
 
     for (const preference of preferences) {
       processed += 1;
-      const existingRecipient = await BriefRecipient.exists({
-        clerkUserId: preference.clerkUserId,
-        briefDate,
-      });
-      if (existingRecipient || !(await validatePreference(preference))) {
+      // Note: we no longer skip users who already have a recipient for the day.
+      // Recipient creation is an idempotent upsert ($setOnInsert) below, so
+      // re-running is safe — and re-processing lets a refreshed pass update the
+      // shared draft segment with newly-published articles.
+      if (!(await validatePreference(preference))) {
         skipped += 1;
         continue;
       }
@@ -306,13 +328,7 @@ export async function processBriefGenerationBatch(input: {
         preference,
         categoryIds,
         regionIds,
-        signatureHash: signatureHash({
-          briefDate,
-          categoryIds,
-          regionIds,
-          articleWindowStart: run.articleWindowStart,
-          articleWindowEnd: run.articleWindowEnd,
-        }),
+        signatureHash: signatureHash({ briefDate, categoryIds, regionIds }),
       });
     }
 
@@ -323,10 +339,24 @@ export async function processBriefGenerationBatch(input: {
       bySignature.set(candidate.signatureHash, list);
     }
 
+    const refreshedSegmentIds = new Set<string>();
     for (const [hash, group] of bySignature) {
       const first = group[0];
       let segment = await BriefSegment.findOne({ briefDate, signatureHash: hash });
-      if (!segment) {
+
+      // Refresh an existing DRAFT segment when this is a reopened pass and its
+      // window is older than the run's current window (i.e. new articles may
+      // exist). Approved/rejected segments are never silently clobbered — use the
+      // admin Regenerate action for those. Each segment is refreshed at most once
+      // per run.
+      const staleDraft =
+        !!segment &&
+        refreshed &&
+        segment.status === 'draft' &&
+        segment.articleWindowEnd.getTime() < run.articleWindowEnd.getTime() &&
+        !refreshedSegmentIds.has(String(segment._id));
+
+      if (!segment || staleDraft) {
         const { articles, warning } = await selectArticles(
           first.categoryIds,
           first.regionIds,
@@ -334,25 +364,44 @@ export async function processBriefGenerationBatch(input: {
           run.articleWindowEnd,
         );
         const draft = await generateDraft(briefDate, first.categoryIds, first.regionIds, articles, warning);
-        segment = await BriefSegment.create({
-          briefDate,
-          signatureHash: hash,
-          signatureVersion: SIGNATURE_VERSION,
-          categoryIds: first.categoryIds,
-          regionIds: first.regionIds,
-          articleWindowStart: run.articleWindowStart,
-          articleWindowEnd: run.articleWindowEnd,
-          sourceArticleIds: articles.map((article) => article._id),
-          status: 'draft',
-          headlineSummary: draft.headlineSummary,
-          stories: draft.stories,
-          editorialNote: draft.editorialNote,
-          generationStatus: draft.generationStatus,
-          generationError: draft.generationError,
-          generatedAt: new Date(),
-          generatedBy: 'system',
-        });
-        createdSegments += 1;
+        if (!segment) {
+          segment = await BriefSegment.create({
+            briefDate,
+            signatureHash: hash,
+            signatureVersion: SIGNATURE_VERSION,
+            categoryIds: first.categoryIds,
+            regionIds: first.regionIds,
+            articleWindowStart: run.articleWindowStart,
+            articleWindowEnd: run.articleWindowEnd,
+            sourceArticleIds: articles.map((article) => article._id),
+            status: 'draft',
+            headlineSummary: draft.headlineSummary,
+            title: draft.title,
+            summary: draft.summary,
+            stories: draft.stories,
+            editorialNote: draft.editorialNote,
+            generationStatus: draft.generationStatus,
+            generationError: draft.generationError,
+            generatedAt: new Date(),
+            generatedBy: 'system',
+          });
+          createdSegments += 1;
+        } else {
+          segment.articleWindowStart = run.articleWindowStart;
+          segment.articleWindowEnd = run.articleWindowEnd;
+          segment.sourceArticleIds = articles.map((article) => article._id as mongoose.Types.ObjectId);
+          segment.headlineSummary = draft.headlineSummary;
+          segment.title = draft.title;
+          segment.summary = draft.summary;
+          segment.stories = draft.stories;
+          segment.editorialNote = draft.editorialNote;
+          segment.generationStatus = draft.generationStatus;
+          segment.generationError = draft.generationError;
+          segment.generatedAt = new Date();
+          await segment.save();
+          refreshedSegmentIds.add(String(segment._id));
+          reusedSegments += 1;
+        }
       } else {
         reusedSegments += 1;
       }
@@ -361,23 +410,28 @@ export async function processBriefGenerationBatch(input: {
           updateOne: {
             filter: { clerkUserId: candidate.preference.clerkUserId, briefDate },
             update: {
-            $setOnInsert: {
-              clerkUserId: candidate.preference.clerkUserId,
-              briefDate,
-              segmentId: segment!._id,
-              preferenceSnapshot: {
-                categoryIds: candidate.categoryIds,
-                regionIds: candidate.regionIds,
+              // Re-point existing recipients at the current segment: on a refreshed
+              // pass (or a changed-preference signature) the recipient must follow
+              // the freshly generated segment, not stay stuck on the prior one.
+              $set: {
+                segmentId: segment!._id,
+                preferenceSnapshot: {
+                  categoryIds: candidate.categoryIds,
+                  regionIds: candidate.regionIds,
+                  emailEnabled: candidate.preference.emailEnabled,
+                  enabled: candidate.preference.enabled,
+                },
                 emailEnabled: candidate.preference.emailEnabled,
-                enabled: candidate.preference.enabled,
               },
-              emailEnabled: candidate.preference.emailEnabled,
-              emailStatus: candidate.preference.emailEnabled ? ('pending' as const) : ('not_requested' as const),
+              $setOnInsert: {
+                clerkUserId: candidate.preference.clerkUserId,
+                briefDate,
+                emailStatus: candidate.preference.emailEnabled ? 'pending' : 'not_requested',
+              },
             },
+            upsert: true,
           },
-          upsert: true,
-        },
-      }));
+        }));
       if (ops.length > 0) {
         const result = await BriefRecipient.bulkWrite(ops as Parameters<typeof BriefRecipient.bulkWrite>[0], { ordered: false });
         createdRecipients += result.upsertedCount;
@@ -433,11 +487,14 @@ export async function processBriefGenerationBatch(input: {
 export async function regenerateSegment(segmentId: string, adminUserId: string) {
   const segment = await BriefSegment.findById(segmentId);
   if (!segment) throw httpError(404, 'not_found');
+  // Regenerate against a fresh window (now) so the manual admin redo picks up
+  // articles published after the segment was first generated.
+  const window = defaultArticleWindow(new Date());
   const { articles, warning } = await selectArticles(
     asIdStrings(segment.categoryIds),
     asIdStrings(segment.regionIds),
-    segment.articleWindowStart,
-    segment.articleWindowEnd,
+    window.start,
+    window.end,
   );
   const draft = await generateDraft(
     segment.briefDate,
@@ -448,8 +505,12 @@ export async function regenerateSegment(segmentId: string, adminUserId: string) 
   );
   segment.status = 'draft';
   segment.headlineSummary = draft.headlineSummary;
+  segment.title = draft.title;
+  segment.summary = draft.summary;
   segment.stories = draft.stories;
   segment.editorialNote = draft.editorialNote;
+  segment.articleWindowStart = window.start;
+  segment.articleWindowEnd = window.end;
   segment.sourceArticleIds = articles.map((article) => article._id as mongoose.Types.ObjectId);
   segment.generationStatus = draft.generationStatus;
   segment.generationError = draft.generationError;
