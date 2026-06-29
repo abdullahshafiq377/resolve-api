@@ -60,7 +60,6 @@ export async function generateGenericBrief(
     sourceArticleIds: articles.map((a) => a._id as mongoose.Types.ObjectId),
     isGeneric: true,
     status: 'draft',
-    headlineSummary: draft.headlineSummary,
     title: draft.title,
     summary: draft.summary,
     stories: draft.stories,

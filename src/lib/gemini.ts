@@ -125,6 +125,9 @@ export async function generateText(params: {
   systemPrompt: string;
   message: string;
   safetySettings?: SafetySetting[];
+  // When provided, the model is asked for strict JSON matching this schema
+  // (responseMimeType application/json). Use the SDK `Type`-based schema shape.
+  responseSchema?: unknown;
 }): Promise<string> {
   const response = await ai().models.generateContent({
     model: params.model || CHAT_MODEL,
@@ -132,6 +135,9 @@ export async function generateText(params: {
     config: {
       systemInstruction: params.systemPrompt,
       safetySettings: params.safetySettings ?? DEFAULT_SAFETY_SETTINGS,
+      ...(params.responseSchema
+        ? { responseMimeType: 'application/json', responseSchema: params.responseSchema as object }
+        : {}),
     },
   });
   return response.text ?? '';

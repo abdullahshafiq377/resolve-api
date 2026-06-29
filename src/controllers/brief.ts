@@ -34,7 +34,6 @@ async function enrichStories(stories: SegmentStories) {
     return {
       articleId: String(story.articleId),
       headline: story.headline,
-      summary: story.summary,
       url: story.url,
       order: story.order,
       image: article?.featuredImage ?? null,
@@ -51,7 +50,6 @@ async function serializeBrief(recipient: Awaited<ReturnType<typeof BriefRecipien
     id: String(recipient._id),
     segmentId: String(segment._id),
     briefDate: recipient.briefDate,
-    headlineSummary: segment.headlineSummary,
     title: segment.title,
     summary: segment.summary,
     stories: await enrichStories(segment.stories),
@@ -68,7 +66,6 @@ async function serializeGenericBrief(segment: NonNullable<Awaited<ReturnType<typ
     id: String(segment._id),
     segmentId: String(segment._id),
     briefDate: segment.briefDate,
-    headlineSummary: segment.headlineSummary,
     title: segment.title,
     summary: segment.summary,
     stories: await enrichStories(segment.stories),

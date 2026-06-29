@@ -9,7 +9,6 @@ export type BriefGenerationStatus = (typeof BRIEF_GENERATION_STATUSES)[number];
 export interface BriefStory {
   articleId: mongoose.Types.ObjectId;
   headline: string;
-  summary: string;
   url: string;
   order: number;
 }
@@ -27,7 +26,8 @@ export interface BriefSegmentDoc extends Document {
   // a sentinel signatureHash). Generic segments have no BriefRecipients.
   isGeneric: boolean;
   status: BriefSegmentStatus;
-  headlineSummary: string;
+  // null when generation failed — a failed draft stores no fabricated content and
+  // is blocked from approval. Populated only on successful AI/manual generation.
   title: string | null;
   summary: string | null;
   stories: BriefStory[];
@@ -51,7 +51,6 @@ const BriefStorySchema = new Schema<BriefStory>(
   {
     articleId: { type: Schema.Types.ObjectId, ref: 'Article', required: true },
     headline: { type: String, required: true, trim: true },
-    summary: { type: String, required: true, trim: true },
     url: { type: String, required: true, trim: true },
     order: { type: Number, required: true },
   },
@@ -70,7 +69,6 @@ const BriefSegmentSchema = new Schema<BriefSegmentDoc>(
     sourceArticleIds: [{ type: Schema.Types.ObjectId, ref: 'Article' }],
     isGeneric: { type: Boolean, default: false, index: true },
     status: { type: String, enum: BRIEF_SEGMENT_STATUSES, default: 'draft', index: true },
-    headlineSummary: { type: String, required: true, trim: true },
     title: { type: String, default: null, trim: true },
     summary: { type: String, default: null, trim: true },
     stories: { type: [BriefStorySchema], default: [] },

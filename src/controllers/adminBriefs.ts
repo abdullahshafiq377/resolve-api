@@ -94,12 +94,10 @@ function normalizeStories(value: unknown): BriefStory[] {
       throw httpError(400, 'invalid_story_article');
     }
     if (typeof item.headline !== 'string' || !item.headline.trim()) throw httpError(400, 'invalid_story_headline');
-    if (typeof item.summary !== 'string' || !item.summary.trim()) throw httpError(400, 'invalid_story_summary');
     if (typeof item.url !== 'string' || !item.url.trim()) throw httpError(400, 'invalid_story_url');
     return {
       articleId: new mongoose.Types.ObjectId(item.articleId),
       headline: item.headline.trim(),
-      summary: item.summary.trim(),
       url: item.url.trim(),
       order: index + 1,
     };
@@ -110,12 +108,8 @@ export async function update(req: Request, res: Response) {
   const segment = await BriefSegment.findById(req.params.id);
   if (!segment) return res.status(404).json({ error: 'not_found' });
   if (segment.status !== 'draft') throw httpError(409, 'segment_not_editable');
-  if (req.body.headlineSummary !== undefined) {
-    if (typeof req.body.headlineSummary !== 'string' || !req.body.headlineSummary.trim()) {
-      throw httpError(400, 'invalid_headline_summary');
-    }
-    segment.headlineSummary = req.body.headlineSummary.trim();
-  }
+  // Editing toward a publishable draft: title/summary may be cleared mid-edit
+  // (stored as null); the non-empty requirement is enforced at approval, not here.
   if (req.body.title !== undefined) {
     segment.title = typeof req.body.title === 'string' && req.body.title.trim()
       ? req.body.title.trim()
@@ -154,6 +148,12 @@ export async function approve(req: Request, res: Response) {
   const segment = await BriefSegment.findById(req.params.id);
   if (!segment) return res.status(404).json({ error: 'not_found' });
   if (segment.status !== 'draft') throw httpError(409, 'segment_not_approvable');
+  // Never publish a brief with no synthesis. A failed generation (or a draft an
+  // editor has not filled in) has no title/summary/stories — block approval so the
+  // empty/failed state can't reach readers; the editor must regenerate or edit first.
+  if (!segment.title?.trim() || !segment.summary?.trim() || segment.stories.length === 0) {
+    throw httpError(409, 'segment_generation_incomplete');
+  }
   segment.status = 'approved';
   segment.approvedAt = new Date();
   segment.approvedBy = adminUserId(req);

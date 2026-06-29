@@ -27,9 +27,8 @@ function buildBriefEmailHtml(segment: BriefSegmentDoc): string {
     .sort((a, b) => a.order - b.order)
     .map(
       (story) => `
-        <li style="margin:0 0 18px;">
+        <li style="margin:0 0 12px;">
           <a href="${escapeHtml(absolutize(story.url))}" style="color:#111827;font-weight:700;text-decoration:none;">${escapeHtml(story.headline)}</a>
-          <p style="margin:6px 0 0;color:#374151;line-height:1.55;">${escapeHtml(story.summary)}</p>
         </li>
       `,
     )
@@ -40,19 +39,16 @@ function buildBriefEmailHtml(segment: BriefSegmentDoc): string {
     : '';
 
   // The email is the morning edition: lead with the day's title + the full
-  // synthesis summary (paragraph-split), then the "Go Deeper" stories. Fall back
-  // to the short headlineSummary hook when the synthesis is absent.
+  // synthesis summary (paragraph-split), then the "Go Deeper" story headlines.
   const title = segment.title
     ? `<h2 style="font-size:24px;line-height:1.2;margin:0 0 12px;">${escapeHtml(segment.title)}</h2>`
     : '';
-  const summaryBody = segment.summary
-    ? segment.summary
-        .split(/\n{2,}/)
-        .map((para) => para.trim())
-        .filter(Boolean)
-        .map((para) => `<p style="font-size:17px;line-height:1.6;margin:0 0 16px;">${escapeHtml(para)}</p>`)
-        .join('')
-    : `<p style="font-size:18px;line-height:1.55;margin:0 0 24px;">${escapeHtml(segment.headlineSummary)}</p>`;
+  const summaryBody = (segment.summary ?? '')
+    .split(/\n{2,}/)
+    .map((para) => para.trim())
+    .filter(Boolean)
+    .map((para) => `<p style="font-size:17px;line-height:1.6;margin:0 0 16px;">${escapeHtml(para)}</p>`)
+    .join('');
 
   return `
     <div style="font-family:Georgia,'Times New Roman',serif;max-width:640px;margin:0 auto;padding:24px;color:#111827;">

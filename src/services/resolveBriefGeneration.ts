@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { Type } from '@google/genai';
 import mongoose from 'mongoose';
 import Article, { ArticleDoc } from '../models/Article';
 import BriefGenerationRun from '../models/BriefGenerationRun';
@@ -29,7 +30,6 @@ interface Candidate {
 }
 
 interface SegmentDraft {
-  headlineSummary: string;
   title: string | null;
   summary: string | null;
   stories: BriefStory[];
@@ -37,6 +37,31 @@ interface SegmentDraft {
   generationStatus: 'generated' | 'failed' | 'manual';
   generationError: string | null;
 }
+
+// Strict JSON contract for Gemini. Enforcing a responseSchema (rather than
+// hoping a free-text prompt returns clean JSON) is what guarantees `title` and
+// `summary` are always present — previously they silently came back empty.
+const BRIEF_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    title: { type: Type.STRING },
+    summary: { type: Type.STRING },
+    stories: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          articleId: { type: Type.STRING },
+          headline: { type: Type.STRING },
+          url: { type: Type.STRING },
+        },
+        required: ['articleId', 'headline'],
+      },
+    },
+    editorialNote: { type: Type.STRING },
+  },
+  required: ['title', 'summary', 'stories'],
+};
 
 function asIdStrings(ids: mongoose.Types.ObjectId[]): string[] {
   return ids.map(String).sort();
@@ -102,24 +127,18 @@ export async function selectArticles(
   };
 }
 
-function fallbackDraft(articles: ArticleDoc[], warning: string | null): SegmentDraft {
+// A failed draft stores NO fabricated content — the brief is the AI synthesis, so
+// if Gemini does not produce one we record the failure for the admin to see and
+// regenerate, rather than inventing a placeholder. Approval is blocked while a
+// segment has no title/summary (see controllers/adminBriefs.approve).
+function failedDraft(error: string): SegmentDraft {
   return {
-    headlineSummary:
-      articles.length > 0
-        ? `Today's Brief follows ${articles.length} key ${articles.length === 1 ? 'story' : 'stories'} from Resolve's latest reporting.`
-        : 'No matching Resolve stories were available for this Brief segment.',
     title: null,
     summary: null,
-    stories: articles.slice(0, 7).map((article, index) => ({
-      articleId: article._id as mongoose.Types.ObjectId,
-      headline: article.title,
-      summary: article.excerpt,
-      url: articleUrl(article),
-      order: index + 1,
-    })),
+    stories: [],
     editorialNote: null,
-    generationStatus: warning ? 'failed' : 'manual',
-    generationError: warning,
+    generationStatus: 'failed',
+    generationError: error,
   };
 }
 
@@ -135,7 +154,7 @@ export async function generateDraft(
   articles: ArticleDoc[],
   warning: string | null,
 ): Promise<SegmentDraft> {
-  if (articles.length === 0) return fallbackDraft(articles, warning);
+  if (articles.length === 0) return failedDraft('no_source_articles');
 
   try {
     const [categories, regions] = await Promise.all([
@@ -151,48 +170,52 @@ export async function generateDraft(
       bodyExcerpt: extractPlainText(article.body).slice(0, 1800),
     }));
     const raw = await generateText({
+      responseSchema: BRIEF_RESPONSE_SCHEMA,
       systemPrompt:
-        'You are an editor for Resolve. Return only valid JSON for The Resolve Brief. Keep summaries concise, neutral, and premium-newsroom quality.',
+        'You are an editor for Resolve. Return only valid JSON for The Resolve Brief. Keep the writing concise, neutral, and premium-newsroom quality.',
       message: JSON.stringify({
         briefDate,
         categories: categories.map((category) => category.title),
         regions: regions.map((region) => region.slug === GLOBAL_REGION_SLUG ? 'Global' : region.title),
         instruction:
           'Create a 3-5 minute daily morning brief: an original synthesis that orients the reader. ' +
-          'Produce a short editorial `title` (the headline of the day, ~6-12 words), a 1-2 sentence `headlineSummary` hook, ' +
+          'Produce a short editorial `title` (the headline of the day, ~6-12 words) ' +
           'and a multi-paragraph `summary` that (1) recaps what has happened since yesterday and overnight, ' +
           '(2) explains why it matters and connects the threads of the developing story, and ' +
           '(3) looks ahead to what is scheduled or expected, framed as "expected", "due", or "watch for". ' +
-          'Also include 5-7 stories when supplied, and an optional editorialNote.',
-        requiredShape: {
-          title: 'string',
-          headlineSummary: 'string',
-          summary: 'string (multiple paragraphs separated by blank lines)',
-          stories: [{ articleId: 'string', headline: 'string', summary: 'string', url: 'string' }],
-          editorialNote: 'string or null',
-        },
+          'Separate summary paragraphs with a blank line. ' +
+          'Also include 5-7 `stories` selected from the supplied articles (echo back each `articleId`, ' +
+          'its `headline`, and `url`), and an optional `editorialNote`.',
         articles: articlePayload,
       }),
     });
+    // An empty response means Gemini returned nothing — almost always a safety
+    // block, an exhausted/invalid API key, or a quota error. Surface that clearly
+    // instead of letting JSON.parse('') throw an opaque "Unexpected end of input".
+    if (!raw.trim()) throw new Error('gemini_empty_response (safety block, quota, or invalid API key)');
     const parsed = parseGeminiJson(raw) as {
       title?: unknown;
-      headlineSummary?: unknown;
       summary?: unknown;
-      stories?: { articleId?: unknown; headline?: unknown; summary?: unknown; url?: unknown }[];
+      stories?: { articleId?: unknown; headline?: unknown; url?: unknown }[];
       editorialNote?: unknown;
     };
-    if (typeof parsed.headlineSummary !== 'string' || !Array.isArray(parsed.stories)) {
+    if (
+      typeof parsed.title !== 'string' ||
+      !parsed.title.trim() ||
+      typeof parsed.summary !== 'string' ||
+      !parsed.summary.trim() ||
+      !Array.isArray(parsed.stories)
+    ) {
       throw new Error('invalid_gemini_shape');
     }
     const articleMap = new Map(articles.map((article) => [String(article._id), article]));
     const stories = parsed.stories
       .map((story, index) => {
         const source = typeof story.articleId === 'string' ? articleMap.get(story.articleId) : null;
-        if (!source || typeof story.headline !== 'string' || typeof story.summary !== 'string') return null;
+        if (!source || typeof story.headline !== 'string') return null;
         return {
           articleId: source._id as mongoose.Types.ObjectId,
           headline: story.headline.trim() || source.title,
-          summary: story.summary.trim() || source.excerpt,
           url: typeof story.url === 'string' && story.url ? story.url : articleUrl(source),
           order: index + 1,
         };
@@ -200,19 +223,20 @@ export async function generateDraft(
       .filter((story): story is BriefStory => Boolean(story))
       .slice(0, 7);
     if (stories.length === 0) throw new Error('no_valid_gemini_stories');
+    // A successful synthesis stands on its own. A `warning` (e.g. relaxed region
+    // filter, thin source pool) is recorded for the admin but is NOT a failure.
     return {
-      headlineSummary: parsed.headlineSummary.trim(),
-      title: typeof parsed.title === 'string' && parsed.title.trim() ? parsed.title.trim() : null,
-      summary: typeof parsed.summary === 'string' && parsed.summary.trim() ? parsed.summary.trim() : null,
+      title: parsed.title.trim(),
+      summary: parsed.summary.trim(),
       stories,
       editorialNote: typeof parsed.editorialNote === 'string' ? parsed.editorialNote.trim() : null,
-      generationStatus: warning ? 'failed' : 'generated',
+      generationStatus: 'generated',
       generationError: warning,
     };
   } catch (err) {
-    const fallback = fallbackDraft(articles, warning || 'gemini_generation_failed');
-    fallback.generationError = err instanceof Error ? err.message.slice(0, 500) : fallback.generationError;
-    return fallback;
+    const reason = err instanceof Error ? err.message.slice(0, 500) : 'gemini_generation_failed';
+    console.warn('[resolve-brief] generation failed', { briefDate, categoryIds, regionIds, reason });
+    return failedDraft(reason);
   }
 }
 
@@ -375,7 +399,6 @@ export async function processBriefGenerationBatch(input: {
             articleWindowEnd: run.articleWindowEnd,
             sourceArticleIds: articles.map((article) => article._id),
             status: 'draft',
-            headlineSummary: draft.headlineSummary,
             title: draft.title,
             summary: draft.summary,
             stories: draft.stories,
@@ -387,18 +410,28 @@ export async function processBriefGenerationBatch(input: {
           });
           createdSegments += 1;
         } else {
-          segment.articleWindowStart = run.articleWindowStart;
-          segment.articleWindowEnd = run.articleWindowEnd;
-          segment.sourceArticleIds = articles.map((article) => article._id as mongoose.Types.ObjectId);
-          segment.headlineSummary = draft.headlineSummary;
-          segment.title = draft.title;
-          segment.summary = draft.summary;
-          segment.stories = draft.stories;
-          segment.editorialNote = draft.editorialNote;
-          segment.generationStatus = draft.generationStatus;
-          segment.generationError = draft.generationError;
-          segment.generatedAt = new Date();
-          await segment.save();
+          // Atomic update (not load-modify-save): generateDraft above is a slow
+          // Gemini call, so a versioned save() here races concurrent writes and
+          // throws a Mongoose VersionError. findByIdAndUpdate avoids the __v guard.
+          const refreshed = await BriefSegment.findByIdAndUpdate(
+            segment._id,
+            {
+              $set: {
+                articleWindowStart: run.articleWindowStart,
+                articleWindowEnd: run.articleWindowEnd,
+                sourceArticleIds: articles.map((article) => article._id as mongoose.Types.ObjectId),
+                title: draft.title,
+                summary: draft.summary,
+                stories: draft.stories,
+                editorialNote: draft.editorialNote,
+                generationStatus: draft.generationStatus,
+                generationError: draft.generationError,
+                generatedAt: new Date(),
+              },
+            },
+            { new: true, runValidators: true },
+          );
+          if (refreshed) segment = refreshed;
           refreshedSegmentIds.add(String(segment._id));
           reusedSegments += 1;
         }
@@ -436,6 +469,27 @@ export async function processBriefGenerationBatch(input: {
         const result = await BriefRecipient.bulkWrite(ops as Parameters<typeof BriefRecipient.bulkWrite>[0], { ordered: false });
         createdRecipients += result.upsertedCount;
       }
+    }
+
+    // `emailStatus` is only stamped on insert (see the $setOnInsert above), so a
+    // recipient first created while email was OFF stays parked at 'not_requested'
+    // even after the user enables email and we flip emailEnabled→true via $set.
+    // The send step ignores 'not_requested', so those users would silently never
+    // be emailed. Promote them to 'pending' here (never touching already
+    // sent/failed/pending rows) so a re-generation actually picks up the change.
+    const emailEnabledUserIds = candidates
+      .filter((candidate) => candidate.preference.emailEnabled)
+      .map((candidate) => candidate.preference.clerkUserId);
+    if (emailEnabledUserIds.length > 0) {
+      await BriefRecipient.updateMany(
+        {
+          briefDate,
+          clerkUserId: { $in: emailEnabledUserIds },
+          emailEnabled: true,
+          emailStatus: 'not_requested',
+        },
+        { $set: { emailStatus: 'pending' } },
+      );
     }
 
     const lastPreference = preferences[preferences.length - 1];
@@ -503,24 +557,37 @@ export async function regenerateSegment(segmentId: string, adminUserId: string) 
     articles,
     warning,
   );
-  segment.status = 'draft';
-  segment.headlineSummary = draft.headlineSummary;
-  segment.title = draft.title;
-  segment.summary = draft.summary;
-  segment.stories = draft.stories;
-  segment.editorialNote = draft.editorialNote;
-  segment.articleWindowStart = window.start;
-  segment.articleWindowEnd = window.end;
-  segment.sourceArticleIds = articles.map((article) => article._id as mongoose.Types.ObjectId);
-  segment.generationStatus = draft.generationStatus;
-  segment.generationError = draft.generationError;
-  segment.generatedAt = new Date();
-  segment.generatedBy = adminUserId;
-  segment.approvedAt = null;
-  segment.approvedBy = null;
-  segment.rejectedAt = null;
-  segment.rejectedBy = null;
-  segment.rejectionReason = null;
-  await segment.save();
-  return segment;
+  // Apply the regenerated draft atomically. generateDraft above is a multi-second
+  // Gemini call, so a load-modify-`save()` here races concurrent writes (another
+  // regenerate, a generate batch, or a double-click): the whole-array `stories`
+  // reassignment makes Mongoose attach an optimistic __v guard, and a bumped __v
+  // then throws a VersionError ("No matching document found ... version N"). A
+  // single findByIdAndUpdate sidesteps the version guard and is concurrency-safe.
+  const updated = await BriefSegment.findByIdAndUpdate(
+    segmentId,
+    {
+      $set: {
+        status: 'draft',
+        title: draft.title,
+        summary: draft.summary,
+        stories: draft.stories,
+        editorialNote: draft.editorialNote,
+        articleWindowStart: window.start,
+        articleWindowEnd: window.end,
+        sourceArticleIds: articles.map((article) => article._id as mongoose.Types.ObjectId),
+        generationStatus: draft.generationStatus,
+        generationError: draft.generationError,
+        generatedAt: new Date(),
+        generatedBy: adminUserId,
+        approvedAt: null,
+        approvedBy: null,
+        rejectedAt: null,
+        rejectedBy: null,
+        rejectionReason: null,
+      },
+    },
+    { new: true, runValidators: true },
+  );
+  if (!updated) throw httpError(404, 'not_found');
+  return updated;
 }

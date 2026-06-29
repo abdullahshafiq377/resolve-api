@@ -4,23 +4,28 @@ import BriefSegment from '../models/BriefSegment';
 import { tierAtLeast, type PlanTier } from '../middleware/auth';
 
 // A trimmed brief, just enough to ground a `scope:'brief'` chat. Mirrors the
-// shape served by the brief controller (headlineSummary + stories) without the
-// recipient/email metadata.
+// shape served by the brief controller (title + summary + story headlines)
+// without the recipient/email metadata.
 export interface BriefChatContext {
   briefDate: string;
-  headlineSummary: string;
-  stories: { headline: string; summary: string }[];
+  title: string;
+  summary: string;
+  stories: { headline: string }[];
 }
 
 function toContext(segment: {
   briefDate: string;
-  headlineSummary: string;
-  stories: { headline: string; summary: string }[];
+  title: string | null;
+  summary: string | null;
+  stories: { headline: string }[];
 }): BriefChatContext {
+  // Only approved segments reach here, and approval requires a non-empty
+  // title/summary, so these are populated in practice; coerce for the type.
   return {
     briefDate: segment.briefDate,
-    headlineSummary: segment.headlineSummary,
-    stories: (segment.stories ?? []).map((s) => ({ headline: s.headline, summary: s.summary })),
+    title: segment.title ?? '',
+    summary: segment.summary ?? '',
+    stories: (segment.stories ?? []).map((s) => ({ headline: s.headline })),
   };
 }
 

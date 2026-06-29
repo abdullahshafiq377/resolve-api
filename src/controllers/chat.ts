@@ -91,14 +91,16 @@ ${bodyText}`;
 // per-story summaries). Mirrors articleContextPrompt's single-source framing.
 function briefContextPrompt(brief: BriefChatContext): string {
   const stories = brief.stories
-    .map((s, i) => `${i + 1}. ${s.headline}\n${s.summary}`)
-    .join('\n\n');
+    .map((s, i) => `${i + 1}. ${s.headline}`)
+    .join('\n');
   return `${BASE_SYSTEM_PROMPT}
 
 You are answering questions about today's Resolve Brief — a short digest of the day's essential Pakistani stories. Base your answers on the brief below. If a question goes beyond it, you may add brief general context, clearly noting it goes beyond the brief.
 
 --- RESOLVE BRIEF (${brief.briefDate}) ---
-${brief.headlineSummary}
+${brief.title}
+
+${brief.summary}
 
 --- STORIES ---
 ${stories || '(no individual stories)'}`;
