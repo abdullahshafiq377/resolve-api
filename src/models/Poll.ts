@@ -14,6 +14,7 @@ export const POLL_OPTION_TEXT_MIN = 1;
 export const POLL_OPTION_TEXT_MAX = 120;
 export const POLL_DESCRIPTION_MAX = 1000;
 export const POLL_RECENTLY_CLOSED_WINDOW_DAYS = 14;
+export const POLL_FEATURED_MAX = 5;
 
 export interface PollOptionDoc {
   _id: mongoose.Types.ObjectId;
@@ -33,6 +34,12 @@ export interface PollDoc extends Document {
   totalVotes: number;
   optionVoteCounts: Map<string, number>;
   commentCount: number;
+  featured: boolean;
+  // Category mirrors the Article pattern: an ObjectId ref plus denormalized
+  // title/slug so list serialization and public filtering stay query-free.
+  categoryId: mongoose.Types.ObjectId | null;
+  category: string;
+  categorySlug: string | null;
   createdBy: string;
   createdAt: Date;
   lastEditedBy: string;
@@ -100,6 +107,10 @@ const PollSchema = new Schema<PollDoc>(
       default: () => new Map<string, number>(),
     },
     commentCount: { type: Number, default: 0, min: 0 },
+    featured: { type: Boolean, default: false },
+    categoryId: { type: Schema.Types.ObjectId, ref: 'Category', default: null },
+    category: { type: String, default: '', trim: true },
+    categorySlug: { type: String, default: null },
     createdBy: { type: String, required: true, trim: true, index: true },
     lastEditedBy: { type: String, required: true, trim: true },
     publishedBy: { type: String, default: null },
@@ -115,6 +126,8 @@ PollSchema.index({ status: 1, closeDate: 1 });
 PollSchema.index({ status: 1, opensAt: 1 });
 PollSchema.index({ status: 1, createdAt: -1 });
 PollSchema.index({ status: 1, closedAt: -1 });
+PollSchema.index({ status: 1, featured: 1 });
+PollSchema.index({ status: 1, categorySlug: 1 });
 PollSchema.index({ createdBy: 1, createdAt: -1 });
 
 const Poll: Model<PollDoc> =

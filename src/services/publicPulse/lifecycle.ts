@@ -31,6 +31,7 @@ export async function runPublicPulseTransitions(now = new Date()) {
       {
         $set: {
           status: 'closed',
+          featured: false,
           closedBy: 'system',
           closedAt: now,
           lastEditedBy: 'system',

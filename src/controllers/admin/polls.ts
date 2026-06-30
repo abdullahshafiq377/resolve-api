@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
 import Poll, {
   POLL_DESCRIPTION_MAX,
+  POLL_FEATURED_MAX,
   POLL_OPTION_MAX,
   POLL_OPTION_MIN,
   POLL_OPTION_TEXT_MAX,
@@ -13,6 +14,7 @@ import Poll, {
 } from '../../models/Poll';
 import PollVote from '../../models/PollVote';
 import Article from '../../models/Article';
+import Category from '../../models/Category';
 import { isSuperAdmin } from '../../middleware/auth';
 import { generateUniquePollSlug } from '../../services/publicPulse/slug';
 import { bodyContainsPublicPulse } from '../../services/publicPulse/body';
@@ -71,6 +73,22 @@ function normalizeDefinition(body: Record<string, unknown>, existing?: PollDoc) 
   return { question, description, closeDate: closeDate!, options };
 }
 
+// Resolves a category by id, mirroring the Article create/update flow. Responds
+// with 400 invalid_category and returns null when the id is missing or unknown,
+// so callers can `if (!cat) return;` in the same style as loadOr404.
+async function resolveCategoryOr400(value: unknown, res: Response) {
+  if (typeof value !== 'string' || !mongoose.Types.ObjectId.isValid(value)) {
+    res.status(400).json({ error: 'invalid_category' });
+    return null;
+  }
+  const category = await Category.findById(value);
+  if (!category) {
+    res.status(400).json({ error: 'invalid_category' });
+    return null;
+  }
+  return category;
+}
+
 async function loadOr404(req: Request, res: Response): Promise<PollDoc | null> {
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
     res.status(404).json({ error: 'not_found' });
@@ -114,6 +132,10 @@ export async function createPoll(req: Request, res: Response) {
     return res.status(400).json({ error: 'validation_error', details: [{ field: 'resultsMode', message: 'Invalid results mode.' }] });
   }
 
+  // Category is required for new polls (mirrors the Article editorial flow).
+  const category = await resolveCategoryOr400(req.body.categoryId, res);
+  if (!category) return;
+
   const slug = await generateUniquePollSlug(normalized.question, Poll);
   const poll = await Poll.create({
     question: normalized.question,
@@ -123,6 +145,9 @@ export async function createPoll(req: Request, res: Response) {
     closeDate: normalized.closeDate,
     resultsMode: resultsMode ?? 'hidden_until_vote',
     status: 'draft',
+    categoryId: category._id,
+    category: category.title,
+    categorySlug: category.slug,
     createdBy: userId,
     lastEditedBy: userId,
   });
@@ -152,6 +177,14 @@ export async function updatePoll(req: Request, res: Response) {
   }
   if (poll.status === 'active' && normalized.closeDate < poll.closeDate && req.body.confirmCloseDateShorten !== true) {
     return res.status(400).json({ error: 'validation_error', details: { confirmationRequired: true, field: 'closeDate' } });
+  }
+
+  if (req.body.categoryId !== undefined) {
+    const category = await resolveCategoryOr400(req.body.categoryId, res);
+    if (!category) return;
+    poll.categoryId = category._id as mongoose.Types.ObjectId;
+    poll.category = category.title;
+    poll.categorySlug = category.slug;
   }
 
   poll.question = normalized.question;
@@ -219,8 +252,31 @@ export async function closePoll(req: Request, res: Response) {
   if (poll.status !== 'active') return res.status(400).json({ error: 'invalid_state_transition' });
   const now = new Date();
   poll.status = 'closed';
+  poll.featured = false;
   poll.closedBy = userId ?? null;
   poll.closedAt = now;
+  poll.lastEditedBy = userId ?? poll.lastEditedBy;
+  await poll.save();
+  res.json(serializeAdminPoll(poll));
+}
+
+// PATCH /api/admin/polls/:id/featured — toggle the featured flag.
+// Only active polls can be featured, capped at POLL_FEATURED_MAX.
+export async function setFeatured(req: Request, res: Response) {
+  const { userId } = getAuth(req);
+  const poll = await loadOr404(req, res);
+  if (!poll) return;
+
+  const featured = req.body.featured === true;
+  if (featured && !poll.featured) {
+    if (poll.status !== 'active') return res.status(400).json({ error: 'not_featurable' });
+    const count = await Poll.countDocuments({ status: 'active', featured: true });
+    if (count >= POLL_FEATURED_MAX) {
+      return res.status(400).json({ error: 'featured_limit_reached', details: { max: POLL_FEATURED_MAX } });
+    }
+  }
+
+  poll.featured = featured;
   poll.lastEditedBy = userId ?? poll.lastEditedBy;
   await poll.save();
   res.json(serializeAdminPoll(poll));

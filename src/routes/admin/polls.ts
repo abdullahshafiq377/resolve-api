@@ -9,6 +9,7 @@ import {
   publishPoll,
   cancelSchedule,
   closePoll,
+  setFeatured,
   metrics,
   deletePoll,
 } from '../../controllers/admin/polls';
@@ -30,6 +31,7 @@ router.patch('/:id', wrap(updatePoll));
 router.post('/:id/publish', wrap(publishPoll));
 router.post('/:id/cancel-schedule', wrap(cancelSchedule));
 router.post('/:id/close', wrap(closePoll));
+router.patch('/:id/featured', wrap(setFeatured));
 router.delete('/:id', wrap(deletePoll));
 
 export default router;

@@ -1,7 +1,11 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
-import Poll, { POLL_RECENTLY_CLOSED_WINDOW_DAYS, type PollDoc } from '../models/Poll';
+import Poll, {
+  POLL_FEATURED_MAX,
+  POLL_RECENTLY_CLOSED_WINDOW_DAYS,
+  type PollDoc,
+} from '../models/Poll';
 import PollVote from '../models/PollVote';
 import Article from '../models/Article';
 import { httpError } from '../utils/errors';
@@ -65,6 +69,9 @@ export async function listActive(req: Request, res: Response) {
   await syncDueTransitions();
   const { page, limit, skip } = parsePagination(req.query);
   const filter: Record<string, unknown> = { status: 'active' };
+  if (typeof req.query.categorySlug === 'string' && req.query.categorySlug) {
+    filter.categorySlug = req.query.categorySlug;
+  }
   const [polls, total] = await Promise.all([
     Poll.find(filter).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
     Poll.countDocuments(filter),
@@ -72,16 +79,59 @@ export async function listActive(req: Request, res: Response) {
   res.json({ data: polls.map((poll) => serializePublicPoll(poll)), pagination: pagination(total, page, limit) });
 }
 
+// GET /api/public-pulse/featured — active polls flagged featured (single column on the public page).
+export async function listFeatured(req: Request, res: Response) {
+  await syncDueTransitions();
+  const { userId } = getAuth(req);
+  const polls = await Poll.find({ status: 'active', featured: true })
+    .sort({ publishedAt: -1, createdAt: -1 })
+    .limit(POLL_FEATURED_MAX);
+
+  const voteByPoll = new Map<string, string>();
+  if (userId && polls.length) {
+    const votes = await PollVote.find({
+      pollId: { $in: polls.map((poll) => poll._id) },
+      userId,
+    });
+    votes.forEach((vote) => voteByPoll.set(String(vote.pollId), String(vote.optionId)));
+  }
+
+  res.json({
+    data: polls.map((poll) =>
+      serializePublicPoll(poll, voteByPoll.get(String(poll._id)) ?? null),
+    ),
+  });
+}
+
 // GET /api/public-pulse/recent — closed inside recent window.
 export async function listRecent(req: Request, res: Response) {
   await syncDueTransitions();
+  const { userId } = getAuth(req);
   const { page, limit, skip } = parsePagination(req.query);
   const filter: Record<string, unknown> = { status: 'closed', closedAt: { $gte: recentlyClosedCutoff() } };
+  if (typeof req.query.categorySlug === 'string' && req.query.categorySlug) {
+    filter.categorySlug = req.query.categorySlug;
+  }
   const [polls, total] = await Promise.all([
     Poll.find(filter).sort({ closedAt: -1 }).skip(skip).limit(limit),
     Poll.countDocuments(filter),
   ]);
-  res.json({ data: polls.map((poll) => serializePublicPoll(poll)), pagination: pagination(total, page, limit) });
+
+  // When signed in, attach the viewer's vote per poll so closed cards can flag
+  // the reader's own choice (mirrors listFeatured).
+  const voteByPoll = new Map<string, string>();
+  if (userId && polls.length) {
+    const votes = await PollVote.find({
+      pollId: { $in: polls.map((poll) => poll._id) },
+      userId,
+    });
+    votes.forEach((vote) => voteByPoll.set(String(vote.pollId), String(vote.optionId)));
+  }
+
+  res.json({
+    data: polls.map((poll) => serializePublicPoll(poll, voteByPoll.get(String(poll._id)) ?? null)),
+    pagination: pagination(total, page, limit),
+  });
 }
 
 // GET /api/public-pulse/archive — closed outside recent window.

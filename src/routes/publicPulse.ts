@@ -4,6 +4,7 @@ import { requireSignedIn } from '../middleware/auth';
 import { publicPulseVoteRateLimit } from '../middleware/publicPulseRateLimit';
 import {
   listActive,
+  listFeatured,
   listRecent,
   listArchive,
   getOne,
@@ -23,6 +24,7 @@ const wrap =
     Promise.resolve(fn(req, res, next)).catch(next);
 
 router.get('/', wrap(listActive));
+router.get('/featured', wrap(listFeatured));
 router.get('/recent', wrap(listRecent));
 router.get('/archive', wrap(listArchive));
 
