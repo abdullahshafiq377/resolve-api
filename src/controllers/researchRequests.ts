@@ -295,20 +295,38 @@ export async function accountSubmissions(req: Request, res: Response) {
   const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>);
   const filter: Record<string, unknown> = { submitterId: userId };
 
+  // Two status vocabularies share this endpoint:
+  //  - the account page's coarse pending/approved/rejected buckets;
+  //  - the leaderboard "My requests" tab, which filters by the request's own
+  //    lifecycle status (submitted, under_consideration, …) so its status tabs
+  //    behave the same as on the public list.
   const statusFilter = req.query.status;
   if (statusFilter === 'pending') filter.approvedAt = null;
   else if (statusFilter === 'approved') {
     filter.approvedAt = { $ne: null };
     filter.status = { $ne: 'rejected' };
   } else if (statusFilter === 'rejected') filter.status = 'rejected';
+  else if (typeof statusFilter === 'string' && PUBLIC_FILTERABLE_STATUSES.includes(statusFilter)) {
+    filter.status = statusFilter;
+  }
+
+  const categoryId = req.query.categoryId;
+  if (typeof categoryId === 'string' && categoryId) {
+    if (!mongoose.Types.ObjectId.isValid(categoryId)) throw httpError(400, 'invalid_query');
+    filter.categoryId = new mongoose.Types.ObjectId(categoryId);
+  }
+
+  const sortKey = typeof req.query.sort === 'string' ? req.query.sort : 'newest';
+  const sort = SORTS[sortKey] ?? SORTS.newest;
 
   const [requests, total] = await Promise.all([
-    ResearchRequest.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    ResearchRequest.find(filter).sort(sort).skip(skip).limit(limit),
     ResearchRequest.countDocuments(filter),
   ]);
 
+  const { userMap, categoryMap } = await buildLookupMaps(requests);
   res.json({
-    data: requests.map(serializeAccountRequest),
+    data: requests.map((r) => serializeAccountRequest(r, { userMap, categoryMap })),
     pagination: buildPagination(total, page, limit),
   });
 }

@@ -96,13 +96,22 @@ export function serializeLinkedArticle(
 }
 
 // Account "Your submissions" item — includes the private rejectionReason.
-export function serializeAccountRequest(request: ResearchRequestDoc) {
+// When ctx is supplied, enriches with the request's category and the submitter's
+// public identity (display name + avatar) so the leaderboard "My requests" tab
+// can render the same card as the public list.
+export function serializeAccountRequest(
+  request: ResearchRequestDoc,
+  ctx?: { userMap: Map<string, UserDoc>; categoryMap: Map<string, CategoryDoc> },
+) {
+  const categoryId = request.categoryId ? String(request.categoryId) : null;
   return {
     id: String(request._id),
     slug: request.slug,
     title: request.title,
     description: request.description,
     status: request.status,
+    category: categoryId && ctx ? serializeCategoryRef(ctx.categoryMap.get(categoryId)) : null,
+    submitter: ctx ? buildSubmitterPublic(ctx.userMap, request.submitterId) : undefined,
     // Public surfaces gate on approvedAt; the account view exposes the pending state.
     approvedAt: request.approvedAt?.toISOString() ?? null,
     rejectionReason: request.rejectionReason,
