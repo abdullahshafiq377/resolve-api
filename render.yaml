@@ -70,7 +70,10 @@ services:
       # ── Resolve Brief ─────────────────────────────────────────
       - key: GEMINI_BRIEF_MODEL
         value: gemini-flash-latest
-      - key: RESOLVE_BRIEF_CRON_SECRET
+      # Shared Bearer token guarding POST /api/cron/resolve-brief (Brief generation).
+      # Invent a long random string; the scheduler that calls that endpoint must
+      # send `Authorization: Bearer <this value>`. Code reads process.env.CRON_SECRET.
+      - key: CRON_SECRET
         sync: false
       - key: RESEND_API_KEY
         sync: false
