@@ -9,8 +9,7 @@ const wrap =
   (req: Request, res: Response, next: NextFunction) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
-// Public, read-only global search across published articles, shorts, and
-// active categories.
+// Public, read-only global search over published content.
 router.get('/', wrap(search));
 
 export default router;

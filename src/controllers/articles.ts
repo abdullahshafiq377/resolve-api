@@ -15,11 +15,14 @@ import {
 } from '../services/users';
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categories';
+import ResearchRequest from '../models/ResearchRequest';
+import { sanitizePublicPulseBlocks } from '../services/publicPulse/body';
 import { findActiveRegionIdsOrThrow, getGlobalRegion, serializeRegion } from '../services/regions';
 
 const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;
 const HIGHLIGHT_MAX = 3;
+const KEY_STORY_MAX = 5;
 const TOP_STORIES_MAX = 3;
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
 
@@ -51,12 +54,20 @@ async function assertHighlightLimit(excludeId: string | null = null): Promise<vo
   if (count >= HIGHLIGHT_MAX) throw httpError(400, `Highlight limit reached (max ${HIGHLIGHT_MAX})`);
 }
 
+async function assertKeyStoryLimit(excludeId: string | null = null): Promise<void> {
+  const query: Record<string, unknown> = { status: 'published', keyStory: true };
+  if (excludeId) query._id = { $ne: excludeId };
+  const count = await Article.countDocuments(query);
+  if (count >= KEY_STORY_MAX) throw httpError(400, `Key stories limit reached (max ${KEY_STORY_MAX})`);
+}
+
 async function assertTopStoriesLimit(excludeId: string | null = null): Promise<void> {
   const query: Record<string, unknown> = { status: 'published', topStories: true };
   if (excludeId) query._id = { $ne: excludeId };
   const count = await Article.countDocuments(query);
   if (count >= TOP_STORIES_MAX) throw httpError(400, `Top Stories limit reached (max ${TOP_STORIES_MAX})`);
 }
+
 
 // An article author must be the super admin (env-derived) or an active moderator (§6a).
 async function assertValidAuthor(authorId: unknown): Promise<string> {
@@ -177,6 +188,7 @@ function buildListHandler(forcePublished: boolean) {
     if (template) filter.template = template;
     if (req.query.featured === 'true') filter.featured = true;
     if (req.query.highlight === 'true') filter.highlight = true;
+    if (req.query.keyStory === 'true') filter.keyStory = true;
     if (req.query.topStories === 'true') filter.topStories = true;
     if (excludeId && mongoose.isValidObjectId(excludeId)) {
       filter._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
@@ -229,7 +241,7 @@ export async function create(req: Request, res: Response) {
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
     template, status, body,
-    featured, highlight, topStories, readTimeMinutes,
+    featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
   const authorId = await assertValidAuthor(author_id);
@@ -240,13 +252,17 @@ export async function create(req: Request, res: Response) {
   const nextStatus = normalizeStatus(status);
   const nextFeatured = nextStatus === 'published' && featured === true;
   const nextHighlight = nextStatus === 'published' && highlight === true;
+  const nextKeyStory = nextStatus === 'published' && keyStory === true;
   const nextTopStories = nextStatus === 'published' && topStories === true;
   if (nextFeatured) await assertFeaturedLimit();
   if (nextHighlight) await assertHighlightLimit();
+  if (nextKeyStory) await assertKeyStoryLimit();
   if (nextTopStories) await assertTopStoriesLimit();
   const readTime = validateReadTime(readTimeMinutes);
 
   const slug = await generateUniqueSlug(title, Article);
+
+  const sanitizedBody = await sanitizePublicPulseBlocks(body);
 
   const article = await Article.create({
     title, slug, excerpt, authorId, categoryId: categoryDoc._id, category: categoryDoc.title,
@@ -256,8 +272,8 @@ export async function create(req: Request, res: Response) {
     template,
     // Publish date is system-managed: stamped when published, absent for drafts.
     publishDate: nextStatus === 'published' ? new Date() : undefined,
-    status: nextStatus, body,
-    featured: nextFeatured, highlight: nextHighlight, topStories: nextTopStories,
+    status: nextStatus, body: sanitizedBody,
+    featured: nextFeatured, highlight: nextHighlight, keyStory: nextKeyStory, topStories: nextTopStories,
     readTimeMinutes: readTime,
   });
 
@@ -276,7 +292,7 @@ export async function update(req: Request, res: Response) {
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
     template, status, body,
-    featured, highlight, topStories, readTimeMinutes,
+    featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
   const current = await Article.findById(req.params.id);
@@ -286,15 +302,19 @@ export async function update(req: Request, res: Response) {
   const wasPublished = current.status === 'published';
   const currentFeatured = current.status === 'published' ? current.featured : false;
   const currentHighlight = current.status === 'published' ? current.highlight : false;
+  const currentKeyStory = current.status === 'published' ? current.keyStory : false;
   const nextFeatured =
     nextStatus === 'published' ? (featured !== undefined ? featured === true : currentFeatured) : false;
   const nextHighlight =
     nextStatus === 'published' ? (highlight !== undefined ? highlight === true : currentHighlight) : false;
+  const nextKeyStory =
+    nextStatus === 'published' ? (keyStory !== undefined ? keyStory === true : currentKeyStory) : false;
   const currentTopStories = current.status === 'published' ? current.topStories : false;
   const nextTopStories =
     nextStatus === 'published' ? (topStories !== undefined ? topStories === true : currentTopStories) : false;
   const shouldClearDraftFeatured = nextStatus === 'draft' && current.featured;
   const shouldClearDraftHighlight = nextStatus === 'draft' && current.highlight;
+  const shouldClearDraftKeyStory = nextStatus === 'draft' && current.keyStory;
   const shouldClearDraftTopStories = nextStatus === 'draft' && current.topStories;
   const isRemovingAudio =
     audioUrl === null || audioUrl === '' || audioKey === null || audioKey === '';
@@ -306,6 +326,7 @@ export async function update(req: Request, res: Response) {
   // placements only.
   if (nextFeatured && !currentFeatured) await assertFeaturedLimit(req.params.id);
   if (nextHighlight && !currentHighlight) await assertHighlightLimit(req.params.id);
+  if (nextKeyStory && !currentKeyStory) await assertKeyStoryLimit(req.params.id);
   if (nextTopStories && !currentTopStories) await assertTopStoriesLimit(req.params.id);
   if (readTimeMinutes !== undefined) validateReadTime(readTimeMinutes);
 
@@ -348,9 +369,10 @@ export async function update(req: Request, res: Response) {
     patch.publishDate = new Date();
   }
   if (status !== undefined) patch.status = nextStatus;
-  if (body !== undefined) patch.body = body;
+  if (body !== undefined) patch.body = await sanitizePublicPulseBlocks(body);
   if (featured !== undefined || status !== undefined || shouldClearDraftFeatured) patch.featured = nextFeatured;
   if (highlight !== undefined || status !== undefined || shouldClearDraftHighlight) patch.highlight = nextHighlight;
+  if (keyStory !== undefined || status !== undefined || shouldClearDraftKeyStory) patch.keyStory = nextKeyStory;
   if (topStories !== undefined || status !== undefined || shouldClearDraftTopStories) patch.topStories = nextTopStories;
   if (readTimeMinutes !== undefined) patch.readTimeMinutes = readTimeMinutes ?? null;
 

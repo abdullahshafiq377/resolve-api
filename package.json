@@ -11,6 +11,12 @@
     "migrate:article-authors": "tsx src/scripts/migrateArticleAuthors.ts",
     "migrate:billing-roles": "tsx src/scripts/migrateBillingRoles.ts",
     "migrate:categories": "tsx src/scripts/migrateCategories.ts",
+    "migrate:research-requests": "tsx src/scripts/researchRequests/migrate.ts",
+    "resync:poll-counts": "tsx src/scripts/resyncPollCounts.ts",
+    "public-pulse:transitions": "tsx src/scripts/runPublicPulseTransitions.ts",
+    "comments:ban-sweeper": "tsx src/scripts/runCommentBanSweeper.ts",
+    "comments:seed-blocked-keywords": "tsx src/scripts/seedBlockedKeywords.ts",
+    "comments:resync-counts": "tsx src/scripts/resyncCommentCounts.ts",
     "migrate:regions": "tsx src/scripts/migrateRegions.ts",
     "migrate:ai-summary": "tsx src/scripts/migrateAiSummary.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
@@ -20,6 +26,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",
     "@aws-sdk/s3-request-presigner": "^3.1045.0",
@@ -33,7 +42,9 @@
     "mongoose": "^9.6.2",
     "morgan": "^1.10.1",
     "resend": "^6.12.4",
-    "svix": "^1.95.1"
+    "socket.io": "^4.8.3",
+    "svix": "^1.95.1",
+    "tsx": "^4.22.4"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
@@ -41,7 +52,6 @@
     "@types/morgan": "^1.9.10",
     "@types/node": "^25.9.1",
     "nodemon": "^3.1.9",
-    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   }
 }

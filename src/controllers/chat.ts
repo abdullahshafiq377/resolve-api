@@ -6,7 +6,8 @@ import ChatUsage from '../models/ChatUsage';
 import Conversation, { ConversationDoc } from '../models/Conversation';
 import ChatMessage from '../models/ChatMessage';
 import { getTier, hasStandard, tierAtLeast, type PlanTier } from '../middleware/auth';
-import { streamChat, resolveModel, type ChatTurn } from '../lib/gemini';
+import { streamChat, resolveModel, type ChatTurn, type ChatImage } from '../lib/gemini';
+import { uploadChatImageFromBase64, deleteS3Object } from '../config/s3';
 import { extractPlainText, approxTokens } from '../lib/articleText';
 import { retrieveChunks, type RetrievedPassage } from '../services/articleEmbeddings';
 import { getBriefForChat, type BriefChatContext } from '../services/briefChatContext';
@@ -135,6 +136,32 @@ interface ChatBody {
   articleId?: unknown;
   slug?: unknown;
   model?: unknown;
+  images?: unknown;
+}
+
+// Inline images attached to the current turn. Kept modest — they're base64 in
+// the request body and passed straight to Gemini, not stored.
+const MAX_IMAGES = 4;
+const MAX_IMAGE_B64_LEN = 8_000_000; // ~6MB decoded per image
+
+function sanitizeImages(raw: unknown): ChatImage[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ChatImage[] = [];
+  for (const item of raw) {
+    if (out.length >= MAX_IMAGES) break;
+    const mimeType = (item as ChatImage)?.mimeType;
+    const data = (item as ChatImage)?.data;
+    if (
+      typeof mimeType === 'string' &&
+      mimeType.startsWith('image/') &&
+      typeof data === 'string' &&
+      data.length > 0 &&
+      data.length <= MAX_IMAGE_B64_LEN
+    ) {
+      out.push({ mimeType, data });
+    }
+  }
+  return out;
 }
 
 function sanitizeHistory(raw: unknown): ChatTurn[] {
@@ -177,14 +204,16 @@ export async function postChat(req: Request, res: Response): Promise<void> {
 
   const body = (req.body ?? {}) as ChatBody;
   const scope = body.scope;
-  const message = body.message;
+  const message = typeof body.message === 'string' ? body.message : '';
+  const images = sanitizeImages(body.images);
 
   // Validate (before any Gemini call) — 400 on bad input.
   if (scope !== 'article' && scope !== 'resolve' && scope !== 'brief') {
     res.status(400).json({ error: 'invalid_scope' });
     return;
   }
-  if (typeof message !== 'string' || !message.trim()) {
+  // A turn needs text or at least one image.
+  if (!message.trim() && images.length === 0) {
     res.status(400).json({ error: 'invalid_message' });
     return;
   }
@@ -289,6 +318,7 @@ export async function postChat(req: Request, res: Response): Promise<void> {
       systemPrompt,
       history,
       message,
+      images,
       signal: controller.signal,
     })) {
       if (clientGone) break;
@@ -325,9 +355,11 @@ export async function postChat(req: Request, res: Response): Promise<void> {
         scope,
         articleId,
         articleTitle: articleDoc?.title,
-        userMessage: message,
+        // Keep a readable title for image-only turns.
+        userMessage: message.trim() || '(image)',
         assistantMessage: assistantText,
         model: modelId,
+        images,
       });
       donePayload = { done: true, conversationId: result.conversationId, title: result.title };
     }
@@ -367,6 +399,7 @@ interface PersistArgs {
   userMessage: string;
   assistantMessage: string;
   model: string;
+  images: ChatImage[];
 }
 
 // Create-or-reuse the Conversation and append the user + assistant turns (Phase 3).
@@ -390,13 +423,31 @@ async function persistTurn(
     });
   }
 
+  // Persist attached images to S3 (best-effort): a failed upload must never lose
+  // the already-delivered answer, so failures are logged and skipped.
+  const storedImages: { url: string; key: string; mimeType: string }[] = [];
+  for (const img of args.images) {
+    try {
+      const { url, key } = await uploadChatImageFromBase64(img);
+      storedImages.push({ url, key, mimeType: img.mimeType });
+    } catch (err) {
+      console.warn('[chat] image upload failed:', (err as Error).message);
+    }
+  }
+
   // Monotonic per-conversation sequence so the user turn always precedes its
   // assistant reply, even when both rows land in the same millisecond. Count of
   // existing messages is the next index (0 for a fresh thread; 2, 4, … on append).
   const seqBase = await ChatMessage.countDocuments({ conversationId: conversation._id });
 
   await ChatMessage.create([
-    { conversationId: conversation._id, role: 'user', content: args.userMessage, seq: seqBase },
+    {
+      conversationId: conversation._id,
+      role: 'user',
+      content: args.userMessage,
+      seq: seqBase,
+      ...(storedImages.length ? { images: storedImages } : {}),
+    },
     {
       conversationId: conversation._id,
       role: 'assistant',
@@ -529,6 +580,9 @@ export async function getConversationDetail(req: Request, res: Response): Promis
       content: m.content,
       model: m.model,
       createdAt: m.createdAt,
+      ...(m.images?.length
+        ? { images: m.images.map((img) => ({ url: img.url, mimeType: img.mimeType })) }
+        : {}),
     })),
   });
 }
@@ -604,6 +658,22 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
   if (!conversation) {
     res.status(404).json({ error: 'not_found' });
     return;
+  }
+
+  // Remove any attached images from S3 first (best-effort), so deleting a thread
+  // doesn't orphan its uploads.
+  const withImages = await ChatMessage.find({
+    conversationId: conversation._id,
+    'images.0': { $exists: true },
+  })
+    .select('images')
+    .lean();
+  for (const m of withImages) {
+    for (const img of m.images ?? []) {
+      await deleteS3Object(img.key).catch((err) => {
+        console.warn('[chat] failed to delete image from S3:', (err as Error).message);
+      });
+    }
   }
 
   // Cascade: drop the thread's messages, then the thread itself, so no

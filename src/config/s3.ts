@@ -53,6 +53,42 @@ export async function deleteS3Object(fileKey: string): Promise<void> {
   await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: fileKey }));
 }
 
+// Chat attachments: uploaded server-side from the inline base64 the client
+// already sends for the model call, so persisted (premium) turns keep a durable
+// URL instead of bloating the message doc. jpeg/png/webp/gif only.
+const CHAT_IMAGE_EXT_BY_TYPE: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+};
+const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024; // 5 MB, matches the composer cap
+
+export async function uploadChatImageFromBase64({
+  data,
+  mimeType,
+}: {
+  data: string;
+  mimeType: string;
+}): Promise<{ url: string; key: string }> {
+  const ext = CHAT_IMAGE_EXT_BY_TYPE[mimeType];
+  if (!ext) throw badRequest('Chat image must be jpeg, png, webp, or gif');
+  const buffer = Buffer.from(data, 'base64');
+  if (buffer.length === 0) throw badRequest('Empty image');
+  if (buffer.length > MAX_CHAT_IMAGE_BYTES) throw badRequest('Chat image exceeds 5MB limit');
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const key = `chat/images/${year}/${month}/${crypto.randomUUID()}${ext}`;
+
+  await s3.send(
+    new PutObjectCommand({ Bucket: BUCKET, Key: key, Body: buffer, ContentType: mimeType }),
+  );
+
+  return { url: buildPublicUrl(key), key };
+}
+
 export async function createUploadUrl({
   filename,
   contentType,

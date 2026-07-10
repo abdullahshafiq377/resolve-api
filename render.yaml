@@ -1,0 +1,93 @@
+# Render Blueprint for the Resolve API (Express + MongoDB + socket.io).
+# Deploy: Render Dashboard -> New -> Blueprint -> point at this repo.
+# Secrets (sync: false) are NOT stored here — Render prompts for them on first
+# deploy. Fill them from your local .env. Never commit real secret values.
+services:
+  - type: web
+    name: resolve-api
+    runtime: node
+    plan: free # Sleeps after 15 min idle; keep-alive via cron-job.org (see below).
+    region: frankfurt # Closest Render EU region to MongoDB Atlas (Ireland / eu-west-1) and S3 (eu-north-1).
+    branch: main
+    healthCheckPath: /health
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      # PORT is injected by Render automatically — do NOT set it here.
+      - key: NODE_ENV
+        value: production
+      - key: CUSTOM_DNS
+        value: "false"
+
+      # ── Database ──────────────────────────────────────────────
+      - key: MONGODB_URI
+        sync: false
+
+      # ── AWS S3 (media uploads) ────────────────────────────────
+      - key: AWS_REGION
+        value: eu-north-1
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: S3_BUCKET_NAME
+        sync: false
+      - key: S3_PUBLIC_BASE_URL
+        value: https://resolve-webapp-media.s3.eu-north-1.amazonaws.com
+      - key: SHORTS_MAX_UPLOAD_MB
+        value: "100"
+      - key: SHORTS_MAX_THUMBNAIL_MB
+        value: "10"
+
+      # ── Clerk auth ────────────────────────────────────────────
+      - key: CLERK_PUBLISHABLE_KEY
+        sync: false
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: CLERK_WEBHOOK_SIGNING_SECRET
+        sync: false
+      - key: SUPER_ADMIN_USER_ID
+        sync: false
+      # Production frontend origin (drives CORS + socket.io allowlist).
+      - key: FRONTEND_ORIGIN
+        value: https://resolve-webapp.vercel.app
+
+      # ── AI Chat / Gemini ──────────────────────────────────────
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_CHAT_MODEL
+        value: gemini-flash-latest
+      - key: GEMINI_CHAT_MODEL_THINKING
+        value: gemini-2.5-flash
+      - key: GEMINI_CHAT_MODEL_PRO
+        value: gemini-2.5-pro
+      - key: GEMINI_EMBED_MODEL
+        value: gemini-embedding-001
+      - key: GEMINI_EMBED_DIM
+        value: "768"
+
+      # ── Resolve Brief ─────────────────────────────────────────
+      - key: GEMINI_BRIEF_MODEL
+        value: gemini-flash-latest
+      - key: RESOLVE_BRIEF_CRON_SECRET
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESOLVE_BRIEF_EMAIL_FROM
+        sync: false
+      # Absolute links inside Brief emails point at the production frontend.
+      - key: RESOLVE_APP_URL
+        value: https://resolve-webapp.vercel.app
+      - key: RESOLVE_BRIEF_EMAIL_BATCH_SIZE
+        value: "10"
+
+      # ── Research Requests: email ──────────────────────────────
+      - key: RESEARCH_REQUESTS_EMAIL_FROM
+        value: editorial@resolve.pk
+      - key: RESEARCH_REQUESTS_EMAIL_REPLY_TO
+        value: editor@resolve.pk
+      - key: RESEARCH_REQUESTS_FANOUT_CONCURRENCY
+        value: "50"
+      - key: RESEARCH_REQUESTS_FANOUT_SYNC_THRESHOLD
+        value: "1000"

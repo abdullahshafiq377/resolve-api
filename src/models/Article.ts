@@ -23,6 +23,7 @@ export interface ArticleDoc extends Document {
   publishDate?: Date;
   featured: boolean;
   highlight: boolean;
+  keyStory: boolean;
   topStories: boolean;
   status: (typeof STATUSES)[number];
   readTimeMinutes: number | null;
@@ -32,6 +33,15 @@ export interface ArticleDoc extends Document {
   // (Phase 2). Lets the embedding pipeline skip re-embedding on metadata-only
   // edits / re-saves where the prose is unchanged. Absent until first embed.
   bodyHash?: string;
+  // True when this article was published from a community Research Request. Auto-set
+  // when a moderator links a published request to it; can be manually toggled.
+  fromResearchRequest: boolean;
+  // Bidirectional link back to the originating ResearchRequest (Option A). Lets the
+  // "From the community" badge link to the request and lets request hard-delete clear the flag.
+  researchRequestId?: mongoose.Types.ObjectId | null;
+  // Denormalised count of visible comments. Kept in sync on comment create/delete
+  // transitions to/from `visible`; repairable via `comments:resync-counts`.
+  commentCount: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -54,11 +64,15 @@ const ArticleSchema = new Schema<ArticleDoc>(
     publishDate: { type: Date },
     featured: { type: Boolean, default: false },
     highlight: { type: Boolean, default: false },
+    keyStory: { type: Boolean, default: false },
     topStories: { type: Boolean, default: false },
     status: { type: String, enum: STATUSES, default: 'draft' },
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },
     bodyHash: { type: String },
+    fromResearchRequest: { type: Boolean, default: false },
+    researchRequestId: { type: Schema.Types.ObjectId, ref: 'ResearchRequest', default: null },
+    commentCount: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true },
 );

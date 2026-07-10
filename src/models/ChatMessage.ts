@@ -7,11 +7,20 @@ const ROLES = ['user', 'assistant'] as const;
 // NOTE: intentionally does NOT extend mongoose's `Document` — that interface
 // reserves a `.model` method which would clash with our `model` field. We read
 // these docs via `.lean()`, so the hydrated-document methods aren't needed.
+// A persisted chat image attachment (user turns only). Stored in S3; the doc
+// keeps the durable public `url` for rendering plus the `key` for cleanup.
+export interface ChatMessageImage {
+  url: string;
+  key: string;
+  mimeType: string;
+}
+
 export interface ChatMessageDoc {
   conversationId: mongoose.Types.ObjectId;
   role: (typeof ROLES)[number];
   content: string;
   model?: string;
+  images?: ChatMessageImage[];
   // Monotonic per-conversation insertion index (user turn before its assistant
   // reply). The authoritative ordering key — immune to createdAt collisions when
   // a turn's pair is written in the same millisecond. Optional: legacy rows
@@ -28,6 +37,17 @@ const ChatMessageSchema = new Schema<ChatMessageDoc>(
     content: { type: String, required: true },
     model: { type: String },
     seq: { type: Number },
+    images: {
+      type: [
+        {
+          _id: false,
+          url: { type: String, required: true },
+          key: { type: String, required: true },
+          mimeType: { type: String, required: true },
+        },
+      ],
+      default: undefined,
+    },
   },
   { timestamps: true },
 );
