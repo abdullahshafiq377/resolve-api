@@ -18,7 +18,7 @@ const ALLOWED_NODE_TYPES = new Set([
   'codeBlock',
 ]);
 
-const ALLOWED_MARK_TYPES = new Set(['bold', 'italic', 'code', 'link']);
+const ALLOWED_MARK_TYPES = new Set(['bold', 'italic', 'code', 'link', 'mention']);
 
 function sanitizeHref(href: unknown): string | null {
   if (typeof href !== 'string') return null;

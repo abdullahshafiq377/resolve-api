@@ -7,6 +7,7 @@ import {
   listPublic,
   getBySlug,
   sidebarPreview,
+  stats,
   submit,
   deleteOwn,
   upvote,
@@ -24,6 +25,7 @@ const wrap =
 // Public reads (anonymous allowed; clerkAuth populates req.auth globally).
 router.get('/', wrap(listPublic));
 router.get('/sidebar-preview', wrap(sidebarPreview));
+router.get('/stats', wrap(stats));
 router.get('/by-article/:articleId', wrap(getByArticle));
 router.get('/:slug', wrap(getBySlug));
 

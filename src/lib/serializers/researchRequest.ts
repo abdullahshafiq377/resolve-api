@@ -9,6 +9,9 @@ const ANONYMOUS_DISPLAY_NAME = 'Anonymous Resolve reader';
 export interface SubmitterPublic {
   displayName: string;
   isAnonymous: boolean;
+  // Cached Clerk avatar for the submitter, when the mirror row is present and
+  // active. Null for hard/soft-deleted users so no stale identity leaks.
+  avatarUrl: string | null;
 }
 
 // Build the public submitter identity from the local User mirror.
@@ -20,9 +23,15 @@ export function buildSubmitterPublic(
   submitterId: string,
 ): SubmitterPublic {
   const user = userMap.get(submitterId);
-  if (!user) return { displayName: ANONYMOUS_DISPLAY_NAME, isAnonymous: true };
-  if (user.deletedAt) return { displayName: ANONYMOUS_DISPLAY_NAME, isAnonymous: false };
-  return { displayName: user.displayName || ANONYMOUS_DISPLAY_NAME, isAnonymous: false };
+  if (!user) return { displayName: ANONYMOUS_DISPLAY_NAME, isAnonymous: true, avatarUrl: null };
+  if (user.deletedAt) {
+    return { displayName: ANONYMOUS_DISPLAY_NAME, isAnonymous: false, avatarUrl: null };
+  }
+  return {
+    displayName: user.displayName || ANONYMOUS_DISPLAY_NAME,
+    isAnonymous: false,
+    avatarUrl: user.imageUrl ?? null,
+  };
 }
 
 function serializeCategoryRef(category: CategoryDoc | undefined | null) {
@@ -50,6 +59,7 @@ export function serializePublicRequest(request: ResearchRequestDoc, ctx: PublicC
     // Public only when the request is in not_pursued; omitted (null) otherwise.
     notPursuedReason: request.status === 'not_pursued' ? request.notPursuedReason : null,
     voteCount: request.voteCount,
+    commentCount: request.commentCount ?? 0,
     viewerHasVoted: ctx.votedRequestIds.has(String(request._id)),
     submittedAt: request.submittedAt?.toISOString() ?? request.createdAt.toISOString(),
     updatedAt: request.updatedAt.toISOString(),
@@ -104,19 +114,33 @@ export function serializeAccountRequest(request: ResearchRequestDoc) {
 }
 
 // Compact request shape for the "My upvoted" list and the sidebar preview.
+// Extra fields (description, category, commentCount, viewerHasVoted) are emitted
+// only when the corresponding lookup maps / flags are supplied, so existing
+// callers (sidebar preview) stay byte-compatible while the leaderboard's
+// "My Upvotes" tab can render the full card.
 export function serializeCompactRequest(
   request: ResearchRequestDoc,
-  userMap?: Map<string, UserDoc>,
+  opts?: {
+    userMap?: Map<string, UserDoc>;
+    categoryMap?: Map<string, CategoryDoc>;
+    viewerHasVoted?: boolean;
+  },
 ) {
   const isPublic = request.approvedAt !== null && request.status !== 'rejected';
+  const categoryId = request.categoryId ? String(request.categoryId) : null;
   return {
     id: String(request._id),
     slug: request.slug,
     title: request.title,
+    description: request.description,
     status: request.status,
+    category:
+      categoryId && opts?.categoryMap ? serializeCategoryRef(opts.categoryMap.get(categoryId)) : null,
     voteCount: request.voteCount,
+    commentCount: request.commentCount ?? 0,
+    viewerHasVoted: opts?.viewerHasVoted ?? false,
     isRemoved: !isPublic,
-    submitter: userMap ? buildSubmitterPublic(userMap, request.submitterId) : undefined,
+    submitter: opts?.userMap ? buildSubmitterPublic(opts.userMap, request.submitterId) : undefined,
     submittedAt: request.submittedAt?.toISOString() ?? request.createdAt.toISOString(),
   };
 }

@@ -4,6 +4,7 @@ import {
   HarmBlockThreshold,
   type SafetySetting,
   type Content,
+  type Part,
 } from '@google/genai';
 
 // ── Config (env-driven; model IDs never hardcoded) ──────────────────────────
@@ -32,6 +33,13 @@ export interface ChatTurn {
   content: string;
 }
 
+// An image attached to the current user turn, sent inline to Gemini (base64,
+// no `data:` prefix). History turns are text-only.
+export interface ChatImage {
+  mimeType: string;
+  data: string;
+}
+
 // Neutral defaults: block only HIGH-probability harmful content so legitimate
 // Pakistani political/defence journalism (which discusses violence, militancy,
 // contested topics) is not over-filtered. Tone/neutrality is steered by the
@@ -58,13 +66,21 @@ export function resolveModel(requested: string | undefined, premium: boolean): s
   return CHAT_MODEL;
 }
 
-// Gemini uses the role 'model' for assistant turns.
-function toGeminiContents(history: ChatTurn[], message: string): Content[] {
+// Gemini uses the role 'model' for assistant turns. Any images attached to the
+// current turn ride along as inlineData parts after the text.
+function toGeminiContents(history: ChatTurn[], message: string, images: ChatImage[] = []): Content[] {
   const contents: Content[] = history.map((t) => ({
     role: t.role === 'assistant' ? 'model' : 'user',
     parts: [{ text: t.content }],
   }));
-  contents.push({ role: 'user', parts: [{ text: message }] });
+  const parts: Part[] = [];
+  if (message) parts.push({ text: message });
+  for (const img of images) {
+    parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+  }
+  // Never send an empty parts array (Gemini rejects it); fall back to a space.
+  if (parts.length === 0) parts.push({ text: ' ' });
+  contents.push({ role: 'user', parts });
   return contents;
 }
 
@@ -73,6 +89,7 @@ export interface StreamChatParams {
   systemPrompt: string;
   history: ChatTurn[];
   message: string;
+  images?: ChatImage[];
   safetySettings?: SafetySetting[];
   signal?: AbortSignal;
 }
@@ -80,10 +97,10 @@ export interface StreamChatParams {
 // Streams text deltas from Gemini. Throws on upstream failure (caller decides
 // whether headers were already sent). Respects an AbortSignal for client-disconnect.
 export async function* streamChat(params: StreamChatParams): AsyncGenerator<string> {
-  const { model, systemPrompt, history, message, safetySettings, signal } = params;
+  const { model, systemPrompt, history, message, images, safetySettings, signal } = params;
   const stream = await ai().models.generateContentStream({
     model,
-    contents: toGeminiContents(history, message),
+    contents: toGeminiContents(history, message, images),
     config: {
       systemInstruction: systemPrompt,
       safetySettings: safetySettings ?? DEFAULT_SAFETY_SETTINGS,

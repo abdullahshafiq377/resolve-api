@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
-import ResearchRequest from '../models/ResearchRequest';
+import ResearchRequest, { type ResearchRequestStatus } from '../models/ResearchRequest';
 import ResearchRequestVote from '../models/ResearchRequestVote';
 import Article from '../models/Article';
 import Category from '../models/Category';
@@ -28,6 +28,24 @@ const SORTS: Record<string, Record<string, 1 | -1>> = {
   recently_active: { updatedAt: -1 },
 };
 
+// Statuses a public visitor can filter the leaderboard by (excludes the internal
+// `rejected` state, which never surfaces publicly).
+const PUBLIC_FILTERABLE_STATUSES = [
+  'submitted',
+  'under_consideration',
+  'being_investigated',
+  'published',
+  'not_pursued',
+];
+
+// Statuses that count as "open" (still moving through the newsroom) for the
+// header stat. Resolved states (published / not_pursued) are excluded.
+const OPEN_STATUSES: ResearchRequestStatus[] = [
+  'submitted',
+  'under_consideration',
+  'being_investigated',
+];
+
 // GET /api/research-requests — public leaderboard.
 export async function listPublic(req: Request, res: Response) {
   const { userId } = getAuth(req);
@@ -42,6 +60,13 @@ export async function listPublic(req: Request, res: Response) {
   if (typeof categoryId === 'string' && categoryId) {
     if (!mongoose.Types.ObjectId.isValid(categoryId)) throw httpError(400, 'invalid_query');
     filter.categoryId = new mongoose.Types.ObjectId(categoryId);
+  }
+
+  const status = req.query.status;
+  if (typeof status === 'string' && status) {
+    if (!PUBLIC_FILTERABLE_STATUSES.includes(status)) throw httpError(400, 'invalid_query');
+    // Narrows the default `status: { $ne: 'rejected' }` gate to a single status.
+    filter.status = status;
   }
 
   const requests = await ResearchRequest.find(filter).sort(sort).skip(skip).limit(limit);
@@ -64,7 +89,28 @@ export async function sidebarPreview(_req: Request, res: Response) {
     .sort({ voteCount: -1, createdAt: -1 })
     .limit(4);
   const { userMap } = await buildLookupMaps(requests);
-  res.json({ data: requests.map((r) => serializeCompactRequest(r, userMap)) });
+  res.json({ data: requests.map((r) => serializeCompactRequest(r, { userMap })) });
+}
+
+// GET /api/research-requests/stats — headline counters for the leaderboard hero.
+export async function stats(_req: Request, res: Response) {
+  const [openRequests, storiesPublished, supportsAgg] = await Promise.all([
+    ResearchRequest.countDocuments({
+      approvedAt: { $ne: null },
+      status: { $in: OPEN_STATUSES },
+    }),
+    ResearchRequest.countDocuments({ approvedAt: { $ne: null }, status: 'published' }),
+    ResearchRequest.aggregate<{ total: number }>([
+      { $match: PUBLIC_VISIBILITY_FILTER },
+      { $group: { _id: null, total: { $sum: '$voteCount' } } },
+    ]),
+  ]);
+
+  res.json({
+    openRequests,
+    supportsCast: supportsAgg[0]?.total ?? 0,
+    storiesPublished,
+  });
 }
 
 // GET /api/research-requests/:slug — per-request page. 404 for hidden requests.
@@ -281,13 +327,19 @@ export async function accountUpvoted(req: Request, res: Response) {
   const requestIds = votes.map((v) => v.requestId);
   const requests = await ResearchRequest.find({ _id: { $in: requestIds } });
   const byId = new Map(requests.map((r) => [String(r._id), r]));
+  // These are, by definition, requests the viewer has upvoted.
+  const { userMap, categoryMap } = await buildLookupMaps(requests);
 
   const data = votes
     .map((vote) => {
       const request = byId.get(String(vote.requestId));
       if (!request) return null;
       return {
-        request: serializeCompactRequest(request),
+        request: serializeCompactRequest(request, {
+          userMap,
+          categoryMap,
+          viewerHasVoted: true,
+        }),
         votedAt: vote.createdAt.toISOString(),
       };
     })

@@ -10,6 +10,7 @@ import accountRouter from './account';
 import notificationsRouter from './notifications';
 import commentsRouter from './comments';
 import usersRouter from './users';
+import searchRouter from './search';
 
 const router = express.Router();
 
@@ -27,6 +28,7 @@ router.use('/account', accountRouter);
 router.use('/notifications', notificationsRouter);
 router.use('/comments', commentsRouter);
 router.use('/users', usersRouter);
+router.use('/search', searchRouter);
 router.use('/admin', adminRouter);
 
 export default router;
