@@ -17,6 +17,8 @@
     "comments:ban-sweeper": "tsx src/scripts/runCommentBanSweeper.ts",
     "comments:seed-blocked-keywords": "tsx src/scripts/seedBlockedKeywords.ts",
     "comments:resync-counts": "tsx src/scripts/resyncCommentCounts.ts",
+    "migrate:regions": "tsx src/scripts/migrateRegions.ts",
+    "migrate:ai-summary": "tsx src/scripts/migrateAiSummary.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts"
@@ -25,7 +27,7 @@
   "author": "",
   "license": "ISC",
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1045.0",
@@ -39,7 +41,7 @@
     "mongodb": "^7.2.0",
     "mongoose": "^9.6.2",
     "morgan": "^1.10.1",
-    "resend": "^4.8.0",
+    "resend": "^6.12.4",
     "socket.io": "^4.8.3",
     "svix": "^1.95.1",
     "tsx": "^4.22.4"

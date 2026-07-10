@@ -1,11 +1,12 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
-const SCOPES = ['article', 'resolve'] as const;
+const SCOPES = ['article', 'resolve', 'brief'] as const;
 
 // A persisted chat thread. Premium-only (overview §3) — free users' chats are
-// never written. Both scopes persist: `resolve` (Resolve AI page / header) and
-// `article` (article drawer, with `articleId` set). All threads, regardless of
-// origin surface, are listed on the AI Chat page history rail.
+// never written. Scopes persist: `resolve` (Resolve AI page / header), `article`
+// (article context, with `articleId` set), and `brief` (grounded in the user's
+// Resolve Brief). All threads, regardless of origin surface, are listed on the AI
+// Chat page history rail.
 export interface ConversationDoc extends Document {
   clerkUserId: string;
   title: string;
