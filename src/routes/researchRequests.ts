@@ -3,6 +3,8 @@ import type { Request, Response, NextFunction } from 'express';
 import { requireSignedIn } from '../middleware/auth';
 import { requireNotBanned } from '../middleware/requireNotBanned';
 import { voteRateLimit } from '../middleware/researchRequestRateLimit';
+import { validate } from '../middleware/validate';
+import { submitResearchRequestSchema } from '../schemas/researchRequest';
 import {
   listPublic,
   getBySlug,
@@ -30,7 +32,13 @@ router.get('/by-article/:articleId', wrap(getByArticle));
 router.get('/:slug', wrap(getBySlug));
 
 // Signed-in writes (rejected for banned users).
-router.post('/', requireSignedIn, requireNotBanned, wrap(submit));
+router.post(
+  '/',
+  requireSignedIn,
+  requireNotBanned,
+  validate(submitResearchRequestSchema),
+  wrap(submit),
+);
 router.delete('/:id', requireSignedIn, requireNotBanned, wrap(deleteOwn));
 router.post('/:id/upvote', requireSignedIn, requireNotBanned, voteRateLimit, wrap(upvote));
 router.delete('/:id/upvote', requireSignedIn, requireNotBanned, voteRateLimit, wrap(retractVote));

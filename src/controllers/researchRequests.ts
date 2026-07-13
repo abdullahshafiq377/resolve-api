@@ -20,6 +20,7 @@ import {
   serializeAccountRequest,
   serializeCompactRequest,
 } from '../lib/serializers/researchRequest';
+import type { SubmitResearchRequestInput } from '../schemas/researchRequest';
 
 
 const SORTS: Record<string, Record<string, 1 | -1>> = {
@@ -141,20 +142,9 @@ export async function submit(req: Request, res: Response) {
   const { userId } = getAuth(req);
   if (!userId) return res.status(401).json({ error: 'unauthorized' });
 
-  const title = typeof req.body.title === 'string' ? req.body.title.trim() : '';
-  const description = typeof req.body.description === 'string' ? req.body.description.trim() : '';
-  const rawCategoryId = req.body.categoryId;
-
-  const details: { field: string; message: string }[] = [];
-  if (title.length < 8 || title.length > 120) {
-    details.push({ field: 'title', message: 'Title must be 8–120 characters.' });
-  }
-  if (description.length < 20 || description.length > 500) {
-    details.push({ field: 'description', message: 'Description must be 20–500 characters.' });
-  }
-  if (details.length) {
-    return res.status(400).json({ error: 'validation_error', details });
-  }
+  // Shape/length already enforced by validate(submitResearchRequestSchema) on the
+  // route; title/description arrive trimmed. categoryId still resolved below.
+  const { title, description, categoryId: rawCategoryId } = req.body as SubmitResearchRequestInput;
 
   let categoryId: mongoose.Types.ObjectId | null = null;
   if (rawCategoryId !== undefined && rawCategoryId !== null && rawCategoryId !== '') {
