@@ -9,7 +9,8 @@ import { getTier, hasStandard, tierAtLeast, type PlanTier } from '../middleware/
 import { streamChat, resolveModel, type ChatTurn, type ChatImage } from '../lib/gemini';
 import { uploadChatImageFromBase64, deleteS3Object } from '../config/s3';
 import { extractPlainText, approxTokens } from '../lib/articleText';
-import { retrieveChunks, type RetrievedPassage } from '../services/articleEmbeddings';
+import { clipBodyForTier } from '../lib/articleGate';
+import { retrieveForTier, type RetrievedPassage, type LockedHit } from '../services/articleEmbeddings';
 import { getBriefForChat, type BriefChatContext } from '../services/briefChatContext';
 
 // ── Constants (overview §3) ─────────────────────────────────────────────────
@@ -107,9 +108,43 @@ ${brief.summary}
 ${stories || '(no individual stories)'}`;
 }
 
+const PLAN_LABEL: Record<PlanTier, string> = { free: 'Free', standard: 'Standard', premium: 'Premium' };
+
+// How the model should pitch the locked article, given what the reader already
+// pays for. A Standard subscriber is not a prospect — they have already bought
+// in, and asking them to "subscribe" reads as though we forgot. They extend;
+// only a free reader joins.
+function upgradeToneInstruction(tier: PlanTier): string {
+  if (tier === 'standard') {
+    return `The reader is ALREADY a paying Resolve subscriber on the Standard plan. Frame Premium as extending the plan they already have — never as a new or second purchase. Do not use the words "subscribe", "subscription", "buy", "purchase", or "pay", and never imply they are not already a member or do not have a plan. Say something like "that one's part of Premium, which builds on your Standard plan".`;
+  }
+  return `The reader is on the free plan and does not have a subscription yet. Invite them to subscribe to the plan named above, warmly and without pressure.`;
+}
+
+// Tell the model that a gated article answers this question, WITHOUT giving it
+// the article. Titles and slugs are public (they are on every card); the prose is
+// not, and never reaches this prompt — see probeLockedHits.
+//
+// Deliberately carved out of invariant #4: the background passages stay
+// source-blind, but this one fact is meant to be said out loud, because the
+// alternative is the assistant claiming ignorance about an article we published.
+function gateNoticeSection(lockedHits: LockedHit[], tier: PlanTier): string {
+  if (lockedHits.length === 0) return '';
+  const list = lockedHits
+    .map((a) => `- "${a.title}" — requires the ${PLAN_LABEL[a.requiredTier]} plan`)
+    .join('\n');
+  return `
+
+--- MEMBERS-ONLY MATERIAL (metadata only — you do NOT have this text) ---
+Resolve has published the following article(s) that likely cover this question, but they are behind a plan the reader does not have, so their contents are not available to you:
+${list}
+
+Answer whatever you genuinely can from the background context and your general knowledge. If the question cannot be properly answered without those articles, do not pretend the topic is uncovered and do not guess at what they say — name the article and say plainly which plan it is on. ${upgradeToneInstruction(tier)} Mention this once, briefly, then move on; never repeat it or push.`;
+}
+
 // Source-blind (invariant #4): the passages are injected as background the model
 // may use, with no instruction to label what came from Resolve vs. its own knowledge.
-function ragContextPrompt(passages: RetrievedPassage[]): string {
+function ragContextPrompt(passages: RetrievedPassage[], lockedHits: LockedHit[], tier: PlanTier): string {
   let budget = RAG_PASSAGE_TOKEN_BUDGET;
   const kept: string[] = [];
   for (const p of passages) {
@@ -118,13 +153,14 @@ function ragContextPrompt(passages: RetrievedPassage[]): string {
     budget -= t;
     kept.push(p.text);
   }
-  if (kept.length === 0) return BASE_SYSTEM_PROMPT;
+  const gateNotice = gateNoticeSection(lockedHits, tier);
+  if (kept.length === 0) return `${BASE_SYSTEM_PROMPT}${gateNotice}`;
   return `${BASE_SYSTEM_PROMPT}
 
 Use the following background context where relevant to answer the question. Answer naturally; do not mention or label these passages or describe where the information came from.
 
 --- BACKGROUND CONTEXT ---
-${kept.join('\n\n---\n\n')}`;
+${kept.join('\n\n---\n\n')}${gateNotice}`;
 }
 
 // ── Request validation / sanitization ───────────────────────────────────────
@@ -250,8 +286,11 @@ export async function postChat(req: Request, res: Response): Promise<void> {
       res.status(400).json({ error: 'invalid_articleId' });
       return;
     }
+    // Published-only: this endpoint takes a raw ObjectId from the client, so
+    // without the status check any signed-in user who guesses or scrapes an id
+    // gets an unpublished draft's full text read back to them.
     const article = await Article.findById(articleId);
-    if (!article) {
+    if (!article || article.status !== 'published') {
       res.status(400).json({ error: 'article_not_found' });
       return;
     }
@@ -261,7 +300,20 @@ export async function postChat(req: Request, res: Response): Promise<void> {
       publishDate: article.publishDate,
     };
     articleDoc = contextDoc;
-    let text = extractPlainText(article.body);
+
+    // Clip to the reader's tier. A locked reader never sees the article chat UI,
+    // but the endpoint is reachable directly — and grounding the model in the
+    // full body would hand back exactly what the gate withholds.
+    const { body: readableBody, locked } = clipBodyForTier(article.body, article.gateTier ?? null, tier);
+    if (locked) {
+      // Nothing to ground in, so don't spend a model call to say so.
+      res.status(403).json({
+        error: 'article_gated',
+        requiredTier: article.gateTier,
+      });
+      return;
+    }
+    let text = extractPlainText(readableBody);
     if (text.length > ARTICLE_CHAR_CAP) {
       text = `${text.slice(0, ARTICLE_CHAR_CAP)}\n\n[Article truncated for length.]`;
     }
@@ -273,14 +325,15 @@ export async function postChat(req: Request, res: Response): Promise<void> {
     if (brief) {
       systemPrompt = briefContextPrompt(brief);
     } else {
-      const passages = await retrieveChunks(message, { k: 6 });
-      systemPrompt = ragContextPrompt(passages);
+      const { passages, lockedHits } = await retrieveForTier(message, { k: 6, tier });
+      systemPrompt = ragContextPrompt(passages, lockedHits, tier);
     }
   } else {
-    // scope:'resolve' — RAG over the published corpus. Degrades to general
-    // knowledge if the index is empty/unbuilt (retrieveChunks returns []).
-    const passages = await retrieveChunks(message, { k: 6 });
-    systemPrompt = ragContextPrompt(passages);
+    // scope:'resolve' — RAG over the published corpus, filtered to the reader's
+    // tier. Degrades to general knowledge if the index is empty/unbuilt
+    // (retrieveForTier returns empty).
+    const { passages, lockedHits } = await retrieveForTier(message, { k: 6, tier });
+    systemPrompt = ragContextPrompt(passages, lockedHits, tier);
   }
 
   // Resolve the model (Phase 3). Clamped server-side to the tier's ceiling.

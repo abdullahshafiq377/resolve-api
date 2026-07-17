@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
+import { getAuth } from '@clerk/express';
 import type { Request, Response } from 'express';
-import Article, { ArticleDoc } from '../models/Article';
+import Article, { ArticleDoc, GATE_TIERS, type GateTier } from '../models/Article';
 import ArticleSummary from '../models/ArticleSummary';
 import Category, { CategoryDoc } from '../models/Category';
 import Region from '../models/Region';
@@ -18,6 +19,8 @@ import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categor
 import ResearchRequest from '../models/ResearchRequest';
 import { sanitizePublicPulseBlocks } from '../services/publicPulse/body';
 import { findActiveRegionIdsOrThrow, getGlobalRegion, serializeRegion } from '../services/regions';
+import { getTier } from '../middleware/auth';
+import { clipBodyForAudience, countGateNodes, keepFirstGateNode, type Audience } from '../lib/articleGate';
 
 const MAX_LIMIT = 100;
 const FEATURED_MAX = 5;
@@ -26,12 +29,38 @@ const KEY_STORY_MAX = 5;
 const TOP_STORIES_MAX = 3;
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
 
+// Admin/editor routes serialize for the editor, not for a reader — see the
+// `Audience` note on serializeArticle. Already behind requireModerator.
+const ADMIN_AUDIENCE = 'admin' as const;
+
 function validateReadTime(value: unknown): number | null {
   if (value == null) return null;
   if (!Number.isInteger(value) || (value as number) < 1) {
     throw httpError(400, 'readTimeMinutes must be a positive integer');
   }
   return value as number;
+}
+
+// '' / 'none' / null all mean "ungated" — the admin select submits '' for None.
+function normalizeGateTier(value: unknown, fallback: GateTier | undefined = undefined): GateTier | undefined {
+  if (value === undefined) return fallback;
+  if (value === null || value === '' || value === 'none') return undefined;
+  if (GATE_TIERS.includes(value as GateTier)) return value as GateTier;
+  throw httpError(400, 'invalid_gateTier');
+}
+
+// The gate invariant: gateTier is set IFF the body has a gate node. Half a gate
+// is the dangerous state — a tier with no node would fail closed and blank the
+// article, a node with no tier would render as a silent no-op — so reject both
+// at the boundary rather than letting either reach the reader.
+function assertGateConsistency(body: unknown, gateTier: GateTier | undefined): void {
+  const gates = countGateNodes(body);
+  if (gateTier && gates === 0) {
+    throw httpError(400, 'gate_tier_without_gate_node');
+  }
+  if (!gateTier && gates > 0) {
+    throw httpError(400, 'gate_node_without_gate_tier');
+  }
 }
 
 function normalizeStatus(value: unknown, fallback: ArticleDoc['status'] = 'draft'): ArticleDoc['status'] {
@@ -95,7 +124,14 @@ function applyCategory(obj: Record<string, unknown>, category: CategoryDoc | nul
 }
 
 // Replace authorId with a nested author object joined from the users mirror (§6a).
-async function serializeArticle(doc: ArticleDoc): Promise<Record<string, unknown>> {
+//
+// `audience` decides how much of the body comes back: this is the only place a
+// full body is handed to a caller, so the clip has to happen here rather than in
+// the route. Deliberately required and un-defaulted — a default would fail open,
+// silently unclipping any future caller that forgot it.
+//
+// See `Audience` in lib/articleGate.ts for why 'admin' is not just "premium".
+async function serializeArticle(doc: ArticleDoc, audience: Audience): Promise<Record<string, unknown>> {
   const [users, category, regions, aiSummary] = await Promise.all([
     findUsersByIds([doc.authorId]),
     doc.categoryId ? Category.findById(doc.categoryId) : Promise.resolve(null),
@@ -109,11 +145,35 @@ async function serializeArticle(doc: ArticleDoc): Promise<Record<string, unknown
   applyCategory(obj, category, doc.category);
   obj.regions = regions.map(serializeRegion);
   obj.regionIds = regions.map((region) => String(region._id));
-  if (aiSummary) {
+
+  const gateTier = (doc.gateTier ?? null) as GateTier | null;
+  const { body, teaser, locked } = clipBodyForAudience(doc.body, gateTier, audience);
+  obj.gateTier = gateTier;
+  obj.body = body;
+  // `viewerTier` is for copy only — the gate card addresses a Standard member
+  // differently from a signed-out reader. Returned from here rather than
+  // re-derived on the frontend so there's one authority on what plan someone is
+  // on. Never a permission signal: the body above is already clipped.
+  obj.access = locked
+    ? { locked: true, requiredTier: gateTier, viewerTier: audience === 'admin' ? 'premium' : audience, teaser }
+    : { locked: false, requiredTier: gateTier };
+
+  // The AI summary is distilled from the whole article, so for a locked reader
+  // it is the gated content — just shorter. Withhold it rather than hand over
+  // the payload in miniature.
+  if (aiSummary && !locked) {
     obj.aiSummary = {
       format: aiSummary.format,
       content: aiSummary.content,
     };
+  }
+
+  // Same reasoning as the summary: the audio narrates the WHOLE article, gate and
+  // all. Not hiding the player — dropping the URL, because a link left in the
+  // payload is the article, readable with devtools and no plan.
+  if (locked) {
+    delete obj.audioUrl;
+    delete obj.audioKey;
   }
   return obj;
 }
@@ -145,6 +205,19 @@ async function serializeArticles(docs: ArticleDoc[]): Promise<Record<string, unk
       .filter((region): region is NonNullable<typeof region> => Boolean(region));
     obj.regions = articleRegions.map(serializeRegion);
     obj.regionIds = articleRegions.map((region) => String(region._id));
+    // Listings are body-less (`.select('-body')`), so there is nothing to clip —
+    // gateTier only drives the tier pill on cards. That keeps listings identical
+    // for every reader, and their shared `revalidate: 60` cache safe.
+    obj.gateTier = d.gateTier ?? null;
+    // …but `-body` does not exclude the audio, and the narration is the whole
+    // article. Left in, a listing would hand out the full contents of every gated
+    // article to anyone who called it. Dropped for gated articles regardless of
+    // who is asking: no listing UI plays audio, and keeping this reader-independent
+    // is what lets listings stay cached.
+    if (d.gateTier) {
+      delete obj.audioUrl;
+      delete obj.audioKey;
+    }
     return obj;
   });
 }
@@ -221,17 +294,20 @@ export async function slugCheck(req: Request, res: Response) {
 }
 
 // GET /api/articles/:slug (public — 404 unless published)
+//
+// The response varies by the caller's plan (gated articles are clipped), so this
+// must never be cached across readers — callers send `cache: 'no-store'`.
 export async function getPublishedBySlug(req: Request, res: Response) {
   const article = await Article.findOne({ slug: req.params.slug, status: 'published' });
   if (!article) return res.status(404).json({ error: 'Article not found' });
-  res.json(await serializeArticle(article));
+  res.json(await serializeArticle(article, getTier(getAuth(req))));
 }
 
 // GET /api/admin/articles/slug/:slug (admin — any status)
 export async function getAdminBySlug(req: Request, res: Response) {
   const article = await Article.findOne({ slug: req.params.slug });
   if (!article) return res.status(404).json({ error: 'Article not found' });
-  res.json(await serializeArticle(article));
+  res.json(await serializeArticle(article, ADMIN_AUDIENCE));
 }
 
 // POST /api/admin/articles
@@ -240,7 +316,7 @@ export async function create(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, status, body,
+    template, status, body, gateTier,
     featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
@@ -262,7 +338,9 @@ export async function create(req: Request, res: Response) {
 
   const slug = await generateUniqueSlug(title, Article);
 
-  const sanitizedBody = await sanitizePublicPulseBlocks(body);
+  const nextGateTier = normalizeGateTier(gateTier);
+  const sanitizedBody = keepFirstGateNode(await sanitizePublicPulseBlocks(body));
+  assertGateConsistency(sanitizedBody, nextGateTier);
 
   const article = await Article.create({
     title, slug, excerpt, authorId, categoryId: categoryDoc._id, category: categoryDoc.title,
@@ -272,7 +350,7 @@ export async function create(req: Request, res: Response) {
     template,
     // Publish date is system-managed: stamped when published, absent for drafts.
     publishDate: nextStatus === 'published' ? new Date() : undefined,
-    status: nextStatus, body: sanitizedBody,
+    status: nextStatus, body: sanitizedBody, gateTier: nextGateTier,
     featured: nextFeatured, highlight: nextHighlight, keyStory: nextKeyStory, topStories: nextTopStories,
     readTimeMinutes: readTime,
   });
@@ -282,7 +360,7 @@ export async function create(req: Request, res: Response) {
   // never throws and the bodyHash skip makes unchanged re-saves cheap.
   if (article.status === 'published') await syncArticleEmbeddings(article);
 
-  res.status(201).json(await serializeArticle(article));
+  res.status(201).json(await serializeArticle(article, ADMIN_AUDIENCE));
 }
 
 // PUT /api/admin/articles/:id
@@ -291,7 +369,7 @@ export async function update(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, status, body,
+    template, status, body, gateTier,
     featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
@@ -369,7 +447,18 @@ export async function update(req: Request, res: Response) {
     patch.publishDate = new Date();
   }
   if (status !== undefined) patch.status = nextStatus;
-  if (body !== undefined) patch.body = await sanitizePublicPulseBlocks(body);
+  if (body !== undefined) patch.body = keepFirstGateNode(await sanitizePublicPulseBlocks(body));
+
+  // Body and gateTier can be patched independently, so check the invariant
+  // against the *resulting* pair — dropping the gate node without clearing the
+  // tier (or vice versa) has to fail here, not at render time.
+  const nextGateTier = normalizeGateTier(gateTier, current.gateTier);
+  assertGateConsistency(body !== undefined ? patch.body : current.body, nextGateTier);
+  if (gateTier !== undefined || body !== undefined) {
+    if (nextGateTier) patch.gateTier = nextGateTier;
+    else if (current.gateTier) unset.gateTier = 1;
+  }
+
   if (featured !== undefined || status !== undefined || shouldClearDraftFeatured) patch.featured = nextFeatured;
   if (highlight !== undefined || status !== undefined || shouldClearDraftHighlight) patch.highlight = nextHighlight;
   if (keyStory !== undefined || status !== undefined || shouldClearDraftKeyStory) patch.keyStory = nextKeyStory;
@@ -396,7 +485,7 @@ export async function update(req: Request, res: Response) {
     });
   }
 
-  res.json(await serializeArticle(article!));
+  res.json(await serializeArticle(article!, ADMIN_AUDIENCE));
 }
 
 // DELETE /api/admin/articles/:id

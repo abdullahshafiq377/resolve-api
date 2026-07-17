@@ -6,6 +6,9 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { splitBodyAtGate } from './articleGate';
+import type { GateTier } from '../models/Article';
+
 type JSONContent = any;
 
 // Recursively collect text from a standard rich-text subtree (paragraphs,
@@ -109,6 +112,10 @@ function blockToText(node: JSONContent): string {
     case 'embed':
       return clean(attrs.caption);
 
+    case 'gate':
+      // Editing marker, not prose. See lib/articleGate.ts.
+      return '';
+
     default:
       // Unknown standard container with text children (forward-compatible).
       if (Array.isArray(node.content)) return inlineText(node).trim();
@@ -132,6 +139,18 @@ export function extractPlainText(body: JSONContent): string {
     .join('\n\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+}
+
+// Plain text either side of the gate. `pre` is public; `post` needs the
+// article's gateTier. Chunking each half separately is what keeps a single
+// embedded chunk from straddling the gate and leaking gated prose to a reader
+// who matched on the public half.
+export function extractGatedPlainText(
+  body: JSONContent,
+  gateTier: GateTier | null | undefined,
+): { pre: string; post: string } {
+  const { pre, post } = splitBodyAtGate(body, gateTier);
+  return { pre: extractPlainText(pre), post: extractPlainText(post) };
 }
 
 // Approximate token count (Gemini averages ~4 chars/token for English).

@@ -1,6 +1,10 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 const TEMPLATES = ['standard', 'longform', 'visual'] as const;
 const STATUSES = ['draft', 'published'] as const;
+// Minimum plan tier required to read past the `gate` node in the body. Only the
+// paid tiers are gateable — an ungated article has no gateTier at all.
+export const GATE_TIERS = ['standard', 'premium'] as const;
+export type GateTier = (typeof GATE_TIERS)[number];
 
 export interface ArticleDoc extends Document {
   title: string;
@@ -29,6 +33,11 @@ export interface ArticleDoc extends Document {
   readTimeMinutes: number | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   body: any;
+  // Article gating. Absent = readable by everyone. When set, the body carries a
+  // `gate` node and readers below this tier get only the content before it (plus
+  // a short teaser) — see lib/articleGate.ts. Invariant, enforced on save:
+  // gateTier is set IFF the body contains exactly one `gate` node.
+  gateTier?: GateTier;
   // SHA-256 of the extracted plain text of the last successfully-embedded body
   // (Phase 2). Lets the embedding pipeline skip re-embedding on metadata-only
   // edits / re-saves where the prose is unchanged. Absent until first embed.
@@ -69,6 +78,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     status: { type: String, enum: STATUSES, default: 'draft' },
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },
+    gateTier: { type: String, enum: GATE_TIERS },
     bodyHash: { type: String },
     fromResearchRequest: { type: Boolean, default: false },
     researchRequestId: { type: Schema.Types.ObjectId, ref: 'ResearchRequest', default: null },

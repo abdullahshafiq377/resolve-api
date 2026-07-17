@@ -8,15 +8,53 @@ export const NOTIFICATION_TYPES = [
   'request_being_investigated',
   'request_published',
   'request_not_pursued',
+  'request_supported_published',
   // Comments feature.
   'comment_reply',
   'comment_mention',
+  'comment_upvoted',
   'comment_removed',
   'comment_warning',
+  'comment_paused',
+  'comment_disabled',
   'comment_banned',
   'comment_ban_lifted',
+  'comment_held',
+  'held_comment_approved',
+  'held_comment_removed',
   'report_resolved',
   'report_submitted',
+  'report_received',
+  'report_reviewed',
+  // The Resolve Brief.
+  'brief_ready',
+  'brief_email_sent',
+  'brief_preferences_updated',
+  'brief_awaiting_approval',
+  'brief_approved',
+  'brief_needs_edits',
+  // Resolve AI.
+  'ai_messages_low',
+  'ai_limit_reached',
+  'ai_upgrade_prompt',
+  // Public Pulse.
+  'pulse_poll_live',
+  'pulse_poll_closed',
+  'pulse_vote_recorded',
+  'pulse_tie',
+  'pulse_choice_won',
+  // Billing & subscription.
+  'subscription_renews_soon',
+  'payment_failed',
+  'subscription_updated',
+  'premium_activated',
+  // Account & preferences.
+  'account_updated',
+  'security_updated',
+  'notification_preferences_saved',
+  'email_preferences_updated',
+  // System.
+  'notifications_archived',
 ] as const;
 
 export type NotificationType = (typeof NOTIFICATION_TYPES)[number];

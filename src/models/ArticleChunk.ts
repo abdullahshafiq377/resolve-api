@@ -1,4 +1,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
+import type { PlanTier } from '../middleware/auth';
+
+const TIERS: PlanTier[] = ['free', 'standard', 'premium'];
 
 // A ~800-token slice of a published article's plain text plus its Gemini
 // embedding (Phase 2 RAG). One article -> many chunks, keyed by chunkIndex.
@@ -11,6 +14,12 @@ export interface ArticleChunkDoc extends Document {
   chunkIndex: number;
   text: string;
   embedding: number[];
+  // Minimum plan tier allowed to retrieve this chunk. 'free' for anything before
+  // the article's gate (and for every chunk of an ungated article); the article's
+  // gateTier for anything after it. Enforced as a `filter` field in the Atlas
+  // index, so an ineligible reader's $vectorSearch can never match it — the text
+  // is not merely hidden downstream, it is never read.
+  requiredTier: PlanTier;
   updatedAt: Date;
   createdAt: Date;
 }
@@ -23,6 +32,7 @@ const ArticleChunkSchema = new Schema<ArticleChunkDoc>(
     text: { type: String, required: true },
     // Stored as a plain number[]; the Atlas vectorSearch index lives on this path.
     embedding: { type: [Number], required: true },
+    requiredTier: { type: String, enum: TIERS, required: true, default: 'free' },
   },
   { timestamps: true },
 );
