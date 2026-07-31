@@ -70,6 +70,49 @@ export async function update(req: Request, res: Response) {
   res.json(await serializeAdminCategory(updated));
 }
 
+// POST /api/admin/categories/bulk — batch activity change or delete.
+//
+// A category that anything uses is locked: it can be neither edited nor deleted
+// (see `update` and `remove`). A batch therefore applies to the unused categories
+// in the selection and reports the rest as skipped.
+export async function bulk(req: Request, res: Response) {
+  const { ids, action } = req.body as { ids?: unknown; action?: unknown };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  if (action !== 'active' && action !== 'delete') {
+    return res.status(400).json({ error: 'invalid_action' });
+  }
+
+  const categories = await Category.find({ _id: { $in: ids } });
+  if (categories.length === 0) return res.status(404).json({ error: 'not_found' });
+
+  // Usage decides eligibility for both actions.
+  const usable: CategoryDoc[] = [];
+  for (const category of categories) {
+    const usage = await getCategoryUsage(String(category._id));
+    if (!isCategoryInUse(usage)) usable.push(category);
+  }
+  const skipped = categories.length - usable.length;
+
+  if (action === 'delete') {
+    if (usable.length) {
+      await Category.deleteMany({ _id: { $in: usable.map((category) => category._id) } });
+    }
+    return res.json({ action, affected: usable.length, skipped });
+  }
+
+  const active = req.body.active !== false;
+  if (usable.length) {
+    await Category.updateMany(
+      { _id: { $in: usable.map((category) => category._id) } },
+      { $set: { active } },
+    );
+  }
+  res.json({ action, active, affected: usable.length, skipped });
+}
+
 export async function remove(req: Request, res: Response) {
   const category = await Category.findById(req.params.id);
   if (!category) return res.status(404).json({ error: 'not_found' });

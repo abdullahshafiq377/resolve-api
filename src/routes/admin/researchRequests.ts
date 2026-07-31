@@ -13,6 +13,7 @@ import {
   unlinkArticle,
   listUpvoters,
   hardDelete,
+  bulk,
 } from '../../controllers/admin/researchRequests';
 
 const router = express.Router();
@@ -26,6 +27,8 @@ const wrap =
 router.use(requireModerator);
 
 router.get('/', wrap(listQueue));
+// Bulk sits above /:id so 'bulk' is never read as an id.
+router.post('/bulk', adminActionRateLimit, wrap(bulk));
 router.get('/:id', wrap(getDetail));
 router.get('/:id/upvoters', wrap(listUpvoters));
 router.patch('/:id', wrap(editRequest));

@@ -168,6 +168,46 @@ export async function update(req: Request, res: Response) {
   res.json(await serializeShort(short));
 }
 
+// POST /api/admin/shorts/bulk — batch status change.
+//
+// Shorts have no transition rules: any of draft / published / archived can follow
+// any other, exactly as the single PATCH allows. Publishing stamps `publishedAt`
+// the first time a short goes live and never restamps it.
+export async function bulkShorts(req: Request, res: Response) {
+  const { ids, action, status } = req.body as {
+    ids?: unknown;
+    action?: unknown;
+    status?: unknown;
+  };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  if (action !== 'status') return res.status(400).json({ error: 'invalid_action' });
+  if (status !== 'draft' && status !== 'published' && status !== 'archived') {
+    return res.status(400).json({
+      error: 'validation_error',
+      details: [{ field: 'status', message: 'Invalid status.' }],
+    });
+  }
+
+  const shorts = await Short.find({ _id: { $in: ids } });
+  if (shorts.length === 0) return res.status(404).json({ error: 'Short not found' });
+
+  const ownIds = shorts.map((short) => short._id);
+  await Short.updateMany({ _id: { $in: ownIds } }, { $set: { status } });
+
+  if (status === 'published') {
+    // Only the shorts that have never been published get a publish date.
+    const firstPublish = shorts.filter((short) => !short.publishedAt).map((short) => short._id);
+    if (firstPublish.length) {
+      await Short.updateMany({ _id: { $in: firstPublish } }, { $set: { publishedAt: new Date() } });
+    }
+  }
+
+  res.json({ action, status, affected: shorts.length });
+}
+
 // DELETE /api/admin/shorts/:id  — soft archive
 export async function archive(req: Request, res: Response) {
   const short = await Short.findByIdAndUpdate(req.params.id, { status: 'archived' }, { new: true });

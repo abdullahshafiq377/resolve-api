@@ -9,6 +9,7 @@ import {
   update,
   archive,
   permanentRemove,
+  bulkShorts,
 } from '../../controllers/admin/shorts';
 
 const router = express.Router();
@@ -23,6 +24,8 @@ router.use(requireModerator);
 
 // /upload-url must be registered before /:id to avoid Express treating the literal as an ID.
 router.post('/upload-url', wrap(uploadUrl));
+// /bulk must be registered before /:id for the same reason.
+router.post('/bulk', wrap(bulkShorts));
 router.get('/', wrap(list));
 router.get('/:id', wrap(getById));
 router.post('/', wrap(create));

@@ -122,6 +122,13 @@ export async function listQueue(req: Request, res: Response) {
   } else if (tab === 'rejected') filter.status = 'rejected';
   // tab === 'all' → no extra filter
 
+  // Lifecycle status filter, independent of the moderation tab. Ignored when the
+  // tab already pins a status ('rejected').
+  const status = req.query.status;
+  if (typeof status === 'string' && status && tab !== 'rejected') {
+    filter.status = status;
+  }
+
   const categoryId = req.query.categoryId;
   if (typeof categoryId === 'string' && categoryId && mongoose.Types.ObjectId.isValid(categoryId)) {
     filter.categoryId = new mongoose.Types.ObjectId(categoryId);
@@ -469,6 +476,122 @@ export async function hardDelete(req: Request, res: Response) {
   }
   await request.deleteOne();
   res.status(204).send();
+}
+
+// POST /api/admin/research-requests/bulk
+// Batch equivalent of change-status, category edit and hard delete. Statuses that
+// need per-request input are refused here: 'published' needs its own linked
+// article, and 'rejected' goes through the reject endpoint with a reason.
+export async function bulk(req: Request, res: Response) {
+  const { userId } = getAuth(req);
+  const { ids, action } = req.body as { ids?: unknown; action?: unknown };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  const objectIds = ids.filter(
+    (id): id is string => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id),
+  );
+  if (objectIds.length !== ids.length) return res.status(400).json({ error: 'invalid_request_id' });
+
+  const requests = await ResearchRequest.find({ _id: { $in: objectIds } });
+  if (requests.length === 0) return res.status(404).json({ error: 'not_found' });
+
+  if (action === 'delete') {
+    // Same super-admin gate as the single hard delete.
+    if (!isSuperAdmin(userId)) return res.status(403).json({ error: 'not_super_admin' });
+
+    const requestIds = requests.map((request) => request._id);
+    await ResearchRequestVote.deleteMany({ requestId: { $in: requestIds } });
+    await Notification.deleteMany({ requestId: { $in: requestIds } });
+    const linkedArticleIds = requests
+      .map((request) => request.linkedArticleId)
+      .filter((id): id is mongoose.Types.ObjectId => Boolean(id));
+    if (linkedArticleIds.length) {
+      await Article.updateMany(
+        { _id: { $in: linkedArticleIds } },
+        { $set: { fromResearchRequest: false, researchRequestId: null } },
+      );
+    }
+    await ResearchRequest.deleteMany({ _id: { $in: requestIds } });
+    return res.json({ action, affected: requests.length });
+  }
+
+  if (action === 'category') {
+    const { categoryId } = req.body as { categoryId?: unknown };
+    let nextCategoryId: mongoose.Types.ObjectId | null = null;
+    if (categoryId !== null && categoryId !== '') {
+      if (typeof categoryId !== 'string' || !mongoose.Types.ObjectId.isValid(categoryId)) {
+        return res.status(400).json({ error: 'invalid_category' });
+      }
+      const category = await Category.findById(categoryId);
+      if (!category) return res.status(400).json({ error: 'invalid_category' });
+      nextCategoryId = category._id as mongoose.Types.ObjectId;
+    }
+    await ResearchRequest.updateMany(
+      { _id: { $in: requests.map((request) => request._id) } },
+      { $set: { categoryId: nextCategoryId } },
+    );
+    return res.json({ action, affected: requests.length });
+  }
+
+  if (action === 'status') {
+    const status = req.body.status as ResearchRequestStatus;
+    if (
+      !PUBLIC_SETTABLE_STATUSES.includes(status as (typeof PUBLIC_SETTABLE_STATUSES)[number]) ||
+      status === 'published'
+    ) {
+      // 'published' needs a linked article per request, 'rejected' needs a reason —
+      // both stay on their single-request endpoints.
+      return res.status(400).json({
+        error: 'validation_error',
+        details: [{ field: 'status', message: 'This status cannot be set in bulk.' }],
+      });
+    }
+
+    let notPursuedReason = '';
+    if (status === 'not_pursued') {
+      notPursuedReason =
+        typeof req.body.notPursuedReason === 'string' ? req.body.notPursuedReason.trim() : '';
+      if (!notPursuedReason) return res.status(400).json({ error: 'not_pursued_reason_required' });
+    }
+
+    const now = new Date();
+    for (const request of requests) {
+      const previousStatus = request.status;
+      if (status === 'not_pursued') {
+        request.notPursuedReason = notPursuedReason;
+        request.notPursuedReasonSetBy = userId ?? null;
+        request.notPursuedReasonSetAt = now;
+      }
+      request.status = status;
+      request.statusChangedBy = userId ?? null;
+      request.statusChangedAt = now;
+      await request.save();
+
+      // Notifications match the single-request path exactly — a bulk change is
+      // still a real transition for everyone who upvoted.
+      if (status === previousStatus) continue;
+      if (status === 'not_pursued') {
+        await fanOutHighSignal(
+          request,
+          'request_not_pursued',
+          'An update on a research request you upvoted',
+          `The editorial team has decided not to pursue “${request.title}”.`,
+          requestPath(request),
+          'request_not_pursued',
+          absolute(requestPath(request)),
+          notPursuedReason,
+        );
+      } else {
+        await notifySubmitterStatusChange(request);
+      }
+    }
+
+    return res.json({ action, status, affected: requests.length });
+  }
+
+  return res.status(400).json({ error: 'invalid_action' });
 }
 
 export { isPubliclyVisible };

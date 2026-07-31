@@ -63,6 +63,56 @@ export async function update(req: Request, res: Response) {
   res.json(await serializeAdminRegion(updated));
 }
 
+// POST /api/admin/regions/bulk — batch activity change or delete.
+//
+// Two guards, both reported as skips rather than failing the batch:
+//  · the global region is never touched — deleting it is refused outright, and
+//    deactivating it would pull the fallback out of Brief targeting for everyone;
+//  · a region in use cannot be deleted (its title is locked too, but activity is
+//    deliberately left editable — see `update`).
+export async function bulk(req: Request, res: Response) {
+  const { ids, action } = req.body as { ids?: unknown; action?: unknown };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  if (action !== 'active' && action !== 'delete') {
+    return res.status(400).json({ error: 'invalid_action' });
+  }
+
+  const regions = await Region.find({ _id: { $in: ids } });
+  if (regions.length === 0) return res.status(404).json({ error: 'not_found' });
+
+  const eligible: RegionDoc[] = [];
+  for (const region of regions) {
+    if (await isGlobalRegion(region)) continue;
+    if (action === 'delete') {
+      const usage = await getRegionUsage(String(region._id));
+      const inUse =
+        usage.articleCount + usage.preferenceCount + usage.segmentCount + usage.recipientCount > 0;
+      if (inUse) continue;
+    }
+    eligible.push(region);
+  }
+  const skipped = regions.length - eligible.length;
+
+  if (action === 'delete') {
+    if (eligible.length) {
+      await Region.deleteMany({ _id: { $in: eligible.map((region) => region._id) } });
+    }
+    return res.json({ action, affected: eligible.length, skipped });
+  }
+
+  const active = req.body.active !== false;
+  if (eligible.length) {
+    await Region.updateMany(
+      { _id: { $in: eligible.map((region) => region._id) } },
+      { $set: { active } },
+    );
+  }
+  res.json({ action, active, affected: eligible.length, skipped });
+}
+
 export async function remove(req: Request, res: Response) {
   const region = await Region.findById(req.params.id);
   if (!region) return res.status(404).json({ error: 'not_found' });

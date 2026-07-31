@@ -109,6 +109,9 @@ export async function listPolls(req: Request, res: Response) {
   if (typeof req.query.status === 'string' && req.query.status) {
     filter.status = { $in: req.query.status.split(',') };
   }
+  if (typeof req.query.categoryId === 'string' && mongoose.Types.ObjectId.isValid(req.query.categoryId)) {
+    filter.categoryId = new mongoose.Types.ObjectId(req.query.categoryId);
+  }
   if (req.query.mine === 'true' && userId) filter.createdBy = userId;
   if (typeof req.query.search === 'string' && req.query.search.trim()) {
     filter.question = { $regex: req.query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
@@ -308,6 +311,119 @@ export async function metrics(req: Request, res: Response) {
     votesOverTime: [...buckets.entries()].map(([date, count]) => ({ date, count })),
     embeddedInCount: articles.filter((article) => bodyContainsPublicPulse(article.body, pollIdString)).length,
   });
+}
+
+// POST /api/admin/polls/bulk — batch status change, category move or delete.
+//
+// A poll's status transitions are state-dependent (only a draft or scheduled poll
+// can open, only an active one can close), so a batch applies to whatever is
+// eligible and reports the rest as skipped rather than failing outright.
+export async function bulkPolls(req: Request, res: Response) {
+  const { userId } = getAuth(req);
+  const { ids, action } = req.body as { ids?: unknown; action?: unknown };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  const objectIds = ids.filter(
+    (id): id is string => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id),
+  );
+  if (objectIds.length !== ids.length) return res.status(400).json({ error: 'invalid_poll_id' });
+
+  const polls = await Poll.find({ _id: { $in: objectIds } });
+  if (polls.length === 0) return res.status(404).json({ error: 'not_found' });
+
+  if (action === 'delete') {
+    // Same rule as the single delete: your own poll, or super admin.
+    const deletable = polls.filter((poll) => isSuperAdmin(userId) || poll.createdBy === userId);
+    if (deletable.length) {
+      const pollIds = deletable.map((poll) => poll._id);
+      await PollVote.deleteMany({ pollId: { $in: pollIds } });
+      await Poll.deleteMany({ _id: { $in: pollIds } });
+    }
+    return res.json({ action, affected: deletable.length, skipped: polls.length - deletable.length });
+  }
+
+  if (action === 'category') {
+    const category = await resolveCategoryOr400(req.body.categoryId, res);
+    if (!category) return;
+    // A closed poll is frozen — the single edit endpoint refuses it too.
+    const editable = polls.filter((poll) => poll.status !== 'closed');
+    if (editable.length) {
+      await Poll.updateMany(
+        { _id: { $in: editable.map((poll) => poll._id) } },
+        {
+          $set: {
+            categoryId: category._id,
+            category: category.title,
+            categorySlug: category.slug,
+            lastEditedBy: userId ?? null,
+          },
+        },
+      );
+    }
+    return res.json({ action, affected: editable.length, skipped: polls.length - editable.length });
+  }
+
+  if (action === 'status') {
+    const status = req.body.status;
+    if (status !== 'draft' && status !== 'scheduled' && status !== 'active' && status !== 'closed') {
+      return res.status(400).json({
+        error: 'validation_error',
+        details: [{ field: 'status', message: 'Invalid status.' }],
+      });
+    }
+
+    const now = new Date();
+    let opensAt: Date | null = null;
+    if (status === 'scheduled') {
+      opensAt = parseDate(req.body.opensAt);
+      if (!opensAt || opensAt <= now) {
+        return res.status(400).json({
+          error: 'validation_error',
+          details: [{ field: 'opensAt', message: 'opensAt must be in the future.' }],
+        });
+      }
+    }
+
+    let affected = 0;
+    for (const poll of polls) {
+      // Each target status has exactly one legal source, mirroring the
+      // publish / cancel-schedule / close endpoints.
+      if (status === 'active') {
+        if (poll.status !== 'draft' && poll.status !== 'scheduled') continue;
+        if (poll.closeDate <= now) continue;
+        poll.status = 'active';
+        poll.opensAt = null;
+        poll.publishedBy = userId ?? null;
+        poll.publishedAt = now;
+      } else if (status === 'scheduled') {
+        if (poll.status !== 'draft' && poll.status !== 'scheduled') continue;
+        if (poll.closeDate <= now || !opensAt || opensAt >= poll.closeDate) continue;
+        poll.status = 'scheduled';
+        poll.opensAt = opensAt;
+      } else if (status === 'closed') {
+        if (poll.status !== 'active') continue;
+        poll.status = 'closed';
+        poll.featured = false;
+        poll.closedBy = userId ?? null;
+        poll.closedAt = now;
+      } else {
+        // Back to draft — only a scheduled poll can be pulled back.
+        if (poll.status !== 'scheduled') continue;
+        poll.status = 'draft';
+        poll.opensAt = null;
+      }
+
+      poll.lastEditedBy = userId ?? poll.lastEditedBy;
+      await poll.save();
+      affected += 1;
+    }
+
+    return res.json({ action, status, affected, skipped: polls.length - affected });
+  }
+
+  return res.status(400).json({ error: 'invalid_action' });
 }
 
 export async function deletePoll(req: Request, res: Response) {

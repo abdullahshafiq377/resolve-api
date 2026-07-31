@@ -12,6 +12,7 @@ import {
   setFeatured,
   metrics,
   deletePoll,
+  bulkPolls,
 } from '../../controllers/admin/polls';
 
 const router = express.Router();
@@ -25,6 +26,8 @@ router.use(requireModerator);
 
 router.get('/', wrap(listPolls));
 router.post('/', wrap(createPoll));
+// Bulk sits above /:id so 'bulk' is never read as an id.
+router.post('/bulk', wrap(bulkPolls));
 router.get('/:id/metrics', wrap(metrics));
 router.get('/:id', wrap(getPoll));
 router.patch('/:id', wrap(updatePoll));

@@ -1,6 +1,6 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { create, listAdmin, remove, update } from '../../controllers/categories';
+import { bulk, create, listAdmin, remove, update } from '../../controllers/categories';
 import { requireModerator } from '../../middleware/auth';
 
 const router = express.Router();
@@ -13,6 +13,8 @@ const wrap =
 router.use(requireModerator);
 router.get('/', wrap(listAdmin));
 router.post('/', wrap(create));
+// /bulk must be registered before /:id so it is never read as an id.
+router.post('/bulk', wrap(bulk));
 router.put('/:id', wrap(update));
 router.delete('/:id', wrap(remove));
 
