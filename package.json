@@ -19,9 +19,12 @@
     "comments:resync-counts": "tsx src/scripts/resyncCommentCounts.ts",
     "migrate:regions": "tsx src/scripts/migrateRegions.ts",
     "migrate:ai-summary": "tsx src/scripts/migrateAiSummary.ts",
+    "migrate:chat-message-model": "tsx src/scripts/migrateChatMessageModel.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
+    "backfill:embeddings-v2": "tsx src/scripts/backfillEmbeddingsV2.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
-    "create:vector-index": "tsx src/scripts/createVectorIndex.ts"
+    "create:vector-index": "tsx src/scripts/createVectorIndex.ts",
+    "test": "tsx --test \"src/**/*.test.ts\""
   },
   "keywords": [],
   "author": "",
@@ -30,6 +33,7 @@
     "node": ">=22"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "@aws-sdk/client-s3": "^3.1045.0",
     "@aws-sdk/s3-request-presigner": "^3.1045.0",
     "@clerk/backend": "^3.4.14",

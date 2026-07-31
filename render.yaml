@@ -53,7 +53,37 @@ services:
       - key: FRONTEND_ORIGIN
         value: https://resolve-webapp.vercel.app
 
-      # ── AI Chat / Gemini ──────────────────────────────────────
+      # ── AI Chat (Claude) ──────────────────────────────────────
+      # Either key name works; ANTHROPIC_API_KEY is the SDK's own convention.
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: ANTHROPIC_CHAT_MODEL_VELO
+        value: claude-haiku-4-5
+      - key: ANTHROPIC_CHAT_MODEL_CORE
+        value: claude-sonnet-5
+      - key: ANTHROPIC_CHAT_MODEL_MAX
+        value: claude-opus-4-8
+      # Caps thinking AND response text together — see .env.example.
+      - key: ANTHROPIC_MAX_TOKENS_VELO
+        value: "4096"
+      - key: ANTHROPIC_MAX_TOKENS_CORE
+        value: "16000"
+      - key: ANTHROPIC_MAX_TOKENS_MAX
+        value: "24000"
+      - key: WEB_SEARCH_MAX_USES
+        value: "5"
+      # One-shot models for the non-chat generation jobs (Brief, AI Summary).
+      - key: ANTHROPIC_SUMMARY_MODEL
+        value: claude-sonnet-5
+      - key: ANTHROPIC_BRIEF_MODEL
+        value: claude-sonnet-5
+
+      # ── Gemini ────────────────────────────────────────────────
+      # Only the embedding dual-write is still Gemini; chat, Brief and Summary
+      # have all moved to Claude, and the v1 vectors survive as a rollback target
+      # until the Phase 3 teardown. GEMINI_CHAT_MODEL* are read by nothing that
+      # serves a request — only by scripts/migrateChatMessageModel.ts, to map
+      # legacy ChatMessage.model values. That migration has already run.
       - key: GEMINI_API_KEY
         sync: false
       - key: GEMINI_CHAT_MODEL
@@ -67,9 +97,21 @@ services:
       - key: GEMINI_EMBED_DIM
         value: "768"
 
+      # ── Embeddings (Voyage) ───────────────────────────────────
+      # Anthropic ships no embeddings endpoint. Runs alongside Gemini during the
+      # Phase 2 dual-index cutover; Gemini serves reads until the flip.
+      - key: VOYAGE_API_KEY
+        sync: false
+      - key: VOYAGE_EMBED_MODEL
+        value: voyage-4
+      - key: VOYAGE_EMBED_DIM
+        value: "1024"
+
       # ── Resolve Brief ─────────────────────────────────────────
-      - key: GEMINI_BRIEF_MODEL
-        value: gemini-flash-latest
+      # Output ceiling for one brief. Hitting it fails the draft with
+      # `brief_truncated` rather than storing half a brief.
+      - key: ANTHROPIC_BRIEF_MAX_TOKENS
+        value: "8000"
       # Shared Bearer token guarding POST /api/cron/resolve-brief (Brief generation).
       # Invent a long random string; the scheduler that calls that endpoint must
       # send `Authorization: Bearer <this value>`. Code reads process.env.CRON_SECRET.

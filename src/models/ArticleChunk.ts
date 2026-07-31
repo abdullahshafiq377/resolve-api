@@ -14,6 +14,17 @@ export interface ArticleChunkDoc extends Document {
   chunkIndex: number;
   text: string;
   embedding: number[];
+  // Voyage vector (1024d), written alongside `embedding` during the Phase 2
+  // dual-index cutover. Optional until the backfill completes and the read path
+  // flips; `embedding` keeps serving every read until then. Both are dropped to
+  // one field at the end of the cutover — see the migration plan's W4.
+  embeddingV2?: number[];
+  // Denormalised from Article so retrieval can attribute a passage and weigh how
+  // old it is (directive §2 and §4) without a per-query $lookup. `slug` above is
+  // the precedent. Kept fresh by syncArticleEmbeddings, which already runs on
+  // every publish and edit. Optional until the backfill fills them in.
+  title?: string;
+  publishDate?: Date | null;
   // Minimum plan tier allowed to retrieve this chunk. 'free' for anything before
   // the article's gate (and for every chunk of an ungated article); the article's
   // gateTier for anything after it. Enforced as a `filter` field in the Atlas
@@ -32,6 +43,9 @@ const ArticleChunkSchema = new Schema<ArticleChunkDoc>(
     text: { type: String, required: true },
     // Stored as a plain number[]; the Atlas vectorSearch index lives on this path.
     embedding: { type: [Number], required: true },
+    embeddingV2: { type: [Number], required: false },
+    title: { type: String, required: false },
+    publishDate: { type: Date, required: false, default: null },
     requiredTier: { type: String, enum: TIERS, required: true, default: 'free' },
   },
   { timestamps: true },

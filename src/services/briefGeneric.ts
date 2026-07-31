@@ -14,7 +14,7 @@ export const GENERIC_SIGNATURE_HASH = 'generic';
  * Generate (once per day) the generic free brief — a single shared brief, the
  * same for everyone, drawn from the latest reporting across all active
  * categories (Global region). Reuses the personalised pipeline's article
- * selection + Gemini draft, stored as a `BriefSegment` with `isGeneric: true`
+ * selection + model draft, stored as a `BriefSegment` with `isGeneric: true`
  * and no recipients. It flows through the existing admin approve/reject UI.
  *
  * Idempotent: if a generic segment already exists for the day it is returned

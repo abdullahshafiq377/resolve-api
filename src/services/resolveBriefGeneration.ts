@@ -1,5 +1,4 @@
 import crypto from 'crypto';
-import { Type } from '@google/genai';
 import mongoose from 'mongoose';
 import Article, { ArticleDoc } from '../models/Article';
 import BriefGenerationRun from '../models/BriefGenerationRun';
@@ -9,7 +8,8 @@ import BriefSegment, { BriefStory } from '../models/BriefSegment';
 import Category from '../models/Category';
 import Region from '../models/Region';
 import { extractPlainText } from '../lib/articleText';
-import { generateText } from '../lib/gemini';
+import { generateText, ModelRefusalError, ModelTruncatedError } from '../lib/anthropic';
+import { EDITORIAL_VOICE_PROMPT } from '../lib/editorialVoice';
 import { httpError } from '../utils/errors';
 import { defaultArticleWindow, getPakistanDateString } from './briefDates';
 import { getBriefEligibility } from './briefPremium';
@@ -21,6 +21,13 @@ import { getGlobalRegion, GLOBAL_REGION_SLUG } from './regions';
 const SIGNATURE_VERSION = 2;
 const DEFAULT_BATCH_SIZE = Math.max(1, Number(process.env.RESOLVE_BRIEF_BATCH_SIZE) || 100);
 const LOCK_MS = 10 * 60 * 1000;
+
+const BRIEF_MODEL = process.env.ANTHROPIC_BRIEF_MODEL || 'claude-sonnet-5';
+// A multi-paragraph summary plus up to seven echoed stories. Well above what a
+// brief actually needs; the cap only exists so a runaway generation cannot bill
+// without limit, and hitting it raises ModelTruncatedError rather than producing
+// half a brief.
+const BRIEF_MAX_TOKENS = Math.max(1024, Number(process.env.ANTHROPIC_BRIEF_MAX_TOKENS) || 8_000);
 
 interface Candidate {
   preference: BriefPreferenceDoc;
@@ -38,29 +45,38 @@ interface SegmentDraft {
   generationError: string | null;
 }
 
-// Strict JSON contract for Gemini. Enforcing a responseSchema (rather than
-// hoping a free-text prompt returns clean JSON) is what guarantees `title` and
-// `summary` are always present — previously they silently came back empty.
-const BRIEF_RESPONSE_SCHEMA = {
-  type: Type.OBJECT,
+// Strict JSON contract. Constraining the output shape (rather than hoping a
+// free-text prompt returns clean JSON) is what guarantees `title` and `summary`
+// are always present — previously they silently came back empty.
+//
+// `additionalProperties: false` is mandatory on every object under structured
+// outputs. `url` and `editorialNote` stay out of their `required` lists, which is
+// genuinely optional — verified against the live API rather than assumed, since
+// the strict-mode convention elsewhere is to require everything and allow null.
+// The story-count rule (5-7) is not expressible: the size keywords are dropped,
+// so it lives in the prompt and in the `.slice(0, 7)` below.
+export const BRIEF_RESPONSE_SCHEMA = {
+  type: 'object',
   properties: {
-    title: { type: Type.STRING },
-    summary: { type: Type.STRING },
+    title: { type: 'string' },
+    summary: { type: 'string' },
     stories: {
-      type: Type.ARRAY,
+      type: 'array',
       items: {
-        type: Type.OBJECT,
+        type: 'object',
         properties: {
-          articleId: { type: Type.STRING },
-          headline: { type: Type.STRING },
-          url: { type: Type.STRING },
+          articleId: { type: 'string' },
+          headline: { type: 'string' },
+          url: { type: 'string' },
         },
         required: ['articleId', 'headline'],
+        additionalProperties: false,
       },
     },
-    editorialNote: { type: Type.STRING },
+    editorialNote: { type: 'string' },
   },
   required: ['title', 'summary', 'stories'],
+  additionalProperties: false,
 };
 
 function asIdStrings(ids: mongoose.Types.ObjectId[]): string[] {
@@ -128,9 +144,9 @@ export async function selectArticles(
 }
 
 // A failed draft stores NO fabricated content — the brief is the AI synthesis, so
-// if Gemini does not produce one we record the failure for the admin to see and
-// regenerate, rather than inventing a placeholder. Approval is blocked while a
-// segment has no title/summary (see controllers/adminBriefs.approve).
+// if the model does not produce one we record the failure for the admin to see
+// and regenerate, rather than inventing a placeholder. Approval is blocked while
+// a segment has no title/summary (see controllers/adminBriefs.approve).
 function failedDraft(error: string): SegmentDraft {
   return {
     title: null,
@@ -142,7 +158,11 @@ function failedDraft(error: string): SegmentDraft {
   };
 }
 
-function parseGeminiJson(raw: string): unknown {
+// Structured outputs pin the shape, so the fence-stripping should never fire.
+// Kept as a fallback for the same reason as in aiSummaryGeneration: it is free,
+// and it is the difference between a bad day and an outage if the constraint is
+// ever relaxed.
+function parseModelJson(raw: string): unknown {
   const trimmed = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
   return JSON.parse(trimmed);
 }
@@ -170,9 +190,12 @@ export async function generateDraft(
       bodyExcerpt: extractPlainText(article.body).slice(0, 1800),
     }));
     const raw = await generateText({
-      responseSchema: BRIEF_RESPONSE_SCHEMA,
-      systemPrompt:
-        'You are an editor for Resolve. Return only valid JSON for The Resolve Brief. Keep the writing concise, neutral, and premium-newsroom quality.',
+      model: BRIEF_MODEL,
+      maxTokens: BRIEF_MAX_TOKENS,
+      schema: BRIEF_RESPONSE_SCHEMA,
+      systemPrompt: `You are an editor for Resolve, writing The Resolve Brief. Synthesise only the supplied articles. Keep the writing concise, neutral, and premium-newsroom quality.
+
+${EDITORIAL_VOICE_PROMPT}`,
       message: JSON.stringify({
         briefDate,
         categories: categories.map((category) => category.title),
@@ -189,11 +212,13 @@ export async function generateDraft(
         articles: articlePayload,
       }),
     });
-    // An empty response means Gemini returned nothing — almost always a safety
-    // block, an exhausted/invalid API key, or a quota error. Surface that clearly
-    // instead of letting JSON.parse('') throw an opaque "Unexpected end of input".
-    if (!raw.trim()) throw new Error('gemini_empty_response (safety block, quota, or invalid API key)');
-    const parsed = parseGeminiJson(raw) as {
+    // An empty response means the model returned nothing — almost always an
+    // exhausted/invalid API key or a quota error. (A safety decline is no longer
+    // one of the causes: it arrives as ModelRefusalError, handled below.) Surface
+    // that clearly instead of letting JSON.parse('') throw an opaque
+    // "Unexpected end of input".
+    if (!raw.trim()) throw new Error('model_empty_response (quota or invalid API key)');
+    const parsed = parseModelJson(raw) as {
       title?: unknown;
       summary?: unknown;
       stories?: { articleId?: unknown; headline?: unknown; url?: unknown }[];
@@ -206,7 +231,7 @@ export async function generateDraft(
       !parsed.summary.trim() ||
       !Array.isArray(parsed.stories)
     ) {
-      throw new Error('invalid_gemini_shape');
+      throw new Error('invalid_brief_shape');
     }
     const articleMap = new Map(articles.map((article) => [String(article._id), article]));
     const stories = parsed.stories
@@ -222,7 +247,7 @@ export async function generateDraft(
       })
       .filter((story): story is BriefStory => Boolean(story))
       .slice(0, 7);
-    if (stories.length === 0) throw new Error('no_valid_gemini_stories');
+    if (stories.length === 0) throw new Error('no_valid_brief_stories');
     // A successful synthesis stands on its own. A `warning` (e.g. relaxed region
     // filter, thin source pool) is recorded for the admin but is NOT a failure.
     return {
@@ -234,7 +259,14 @@ export async function generateDraft(
       generationError: warning,
     };
   } catch (err) {
-    const reason = err instanceof Error ? err.message.slice(0, 500) : 'gemini_generation_failed';
+    // The two model-level failures carry no useful message of their own, so name
+    // them here — an admin reading `generationError` in the UI (it is rendered
+    // raw) should be able to tell a safety decline from a truncated generation
+    // without reading the code.
+    let reason: string;
+    if (err instanceof ModelRefusalError) reason = `brief_declined (${err.category ?? 'unspecified'})`;
+    else if (err instanceof ModelTruncatedError) reason = 'brief_truncated (raise ANTHROPIC_BRIEF_MAX_TOKENS)';
+    else reason = err instanceof Error ? err.message.slice(0, 500) : 'brief_generation_failed';
     console.warn('[resolve-brief] generation failed', { briefDate, categoryIds, regionIds, reason });
     return failedDraft(reason);
   }
@@ -411,7 +443,7 @@ export async function processBriefGenerationBatch(input: {
           createdSegments += 1;
         } else {
           // Atomic update (not load-modify-save): generateDraft above is a slow
-          // Gemini call, so a versioned save() here races concurrent writes and
+          // model call, so a versioned save() here races concurrent writes and
           // throws a Mongoose VersionError. findByIdAndUpdate avoids the __v guard.
           const refreshed = await BriefSegment.findByIdAndUpdate(
             segment._id,
@@ -558,7 +590,7 @@ export async function regenerateSegment(segmentId: string, adminUserId: string) 
     warning,
   );
   // Apply the regenerated draft atomically. generateDraft above is a multi-second
-  // Gemini call, so a load-modify-`save()` here races concurrent writes (another
+  // model call, so a load-modify-`save()` here races concurrent writes (another
   // regenerate, a generate batch, or a double-click): the whole-array `stories`
   // reassignment makes Mongoose attach an optimistic __v guard, and a bumped __v
   // then throws a VersionError ("No matching document found ... version N"). A
