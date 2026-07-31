@@ -1,6 +1,6 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { resolveBrief } from '../controllers/cron';
+import { articlesPublishDue, resolveBrief } from '../controllers/cron';
 
 const router = express.Router();
 
@@ -10,5 +10,6 @@ const wrap =
     Promise.resolve(fn(req, res, next)).catch(next);
 
 router.post('/resolve-brief', wrap(resolveBrief));
+router.post('/articles-publish-due', wrap(articlesPublishDue));
 
 export default router;

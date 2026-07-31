@@ -1,6 +1,16 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 const TEMPLATES = ['standard', 'longform', 'visual'] as const;
-const STATUSES = ['draft', 'published'] as const;
+// Editorial lifecycle. Only `published` is publicly readable — every public
+// query filters on it, so `scheduled` and `archived` are invisible to readers
+// by construction.
+//   draft     — work in progress, never had a publish date.
+//   scheduled — approved and waiting for `publishDate`; the articles-publish-due
+//               cron flips it to `published` once that moment passes.
+//   published — live. `publishDate` is stamped and placement flags may be set.
+//   archived  — retired from the site. Placement flags are cleared and the RAG
+//               chunks are purged, same as reverting to draft.
+export const ARTICLE_STATUSES = ['draft', 'scheduled', 'published', 'archived'] as const;
+export type ArticleStatus = (typeof ARTICLE_STATUSES)[number];
 // Minimum plan tier required to read past the `gate` node in the body. Only the
 // paid tiers are gateable — an ungated article has no gateTier at all.
 export const GATE_TIERS = ['standard', 'premium'] as const;
@@ -22,14 +32,15 @@ export interface ArticleDoc extends Document {
   audioUrl?: string;
   audioKey?: string;
   template: (typeof TEMPLATES)[number];
-  // Set only while the article is published. Cleared on revert to draft so a
-  // draft never carries a stale publish date (§ articles statuses).
+  // When published: the moment it went live. When scheduled: the future moment
+  // it is due to go live. Cleared on revert to draft or archive so neither ever
+  // carries a stale publish date (§ articles statuses).
   publishDate?: Date;
   featured: boolean;
   highlight: boolean;
   keyStory: boolean;
   topStories: boolean;
-  status: (typeof STATUSES)[number];
+  status: ArticleStatus;
   readTimeMinutes: number | null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   body: any;
@@ -75,7 +86,7 @@ const ArticleSchema = new Schema<ArticleDoc>(
     highlight: { type: Boolean, default: false },
     keyStory: { type: Boolean, default: false },
     topStories: { type: Boolean, default: false },
-    status: { type: String, enum: STATUSES, default: 'draft' },
+    status: { type: String, enum: ARTICLE_STATUSES, default: 'draft' },
     readTimeMinutes: { type: Number, default: null },
     body: { type: Schema.Types.Mixed, required: true },
     gateTier: { type: String, enum: GATE_TIERS },
@@ -88,6 +99,8 @@ const ArticleSchema = new Schema<ArticleDoc>(
 );
 
 ArticleSchema.index({ regionIds: 1, status: 1, publishDate: -1 });
+// Serves the articles-publish-due cron sweep: {status: 'scheduled', publishDate: {$lte: now}}.
+ArticleSchema.index({ status: 1, publishDate: 1 });
 
 const Article: Model<ArticleDoc> =
   mongoose.models.Article || mongoose.model<ArticleDoc>('Article', ArticleSchema);

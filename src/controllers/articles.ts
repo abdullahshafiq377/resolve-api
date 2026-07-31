@@ -1,7 +1,13 @@
 import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
 import type { Request, Response } from 'express';
-import Article, { ArticleDoc, GATE_TIERS, type GateTier } from '../models/Article';
+import Article, {
+  ARTICLE_STATUSES,
+  ArticleDoc,
+  GATE_TIERS,
+  type ArticleStatus,
+  type GateTier,
+} from '../models/Article';
 import ArticleSummary from '../models/ArticleSummary';
 import Category, { CategoryDoc } from '../models/Category';
 import Region from '../models/Region';
@@ -63,10 +69,30 @@ function assertGateConsistency(body: unknown, gateTier: GateTier | undefined): v
   }
 }
 
-function normalizeStatus(value: unknown, fallback: ArticleDoc['status'] = 'draft'): ArticleDoc['status'] {
+function normalizeStatus(value: unknown, fallback: ArticleStatus = 'draft'): ArticleStatus {
   if (value === undefined) return fallback;
-  if (value === 'draft' || value === 'published') return value;
+  if (ARTICLE_STATUSES.includes(value as ArticleStatus)) return value as ArticleStatus;
   throw httpError(400, 'invalid_status');
+}
+
+// Placement (featured/highlight/keyStory/topStories) is a property of a live
+// article. Scheduled and archived articles are not live, so they carry no
+// placement — same rule drafts have always followed.
+function isLive(status: ArticleStatus): boolean {
+  return status === 'published';
+}
+
+// `scheduled` is the only status whose publish date the client owns: it names
+// the future moment the cron should publish the article. Every other status has
+// a system-managed date (stamped on publish, absent otherwise).
+function normalizeScheduledDate(value: unknown): Date {
+  if (value === undefined || value === null || value === '') {
+    throw httpError(400, 'publish_date_required_for_scheduled');
+  }
+  const date = new Date(value as string);
+  if (Number.isNaN(date.getTime())) throw httpError(400, 'invalid_publish_date');
+  if (date.getTime() <= Date.now()) throw httpError(400, 'publish_date_must_be_future');
+  return date;
 }
 
 async function assertFeaturedLimit(excludeId: string | null = null): Promise<void> {
@@ -259,6 +285,11 @@ function buildListHandler(forcePublished: boolean) {
       filter.status = req.query.status;
     }
     if (template) filter.template = template;
+    // Admin-only gate filter. 'free' means ungated, and an ungated article carries
+    // no gateTier at all — `null` matches both a missing field and an explicit null.
+    if (!forcePublished && req.query.gateTier) {
+      filter.gateTier = req.query.gateTier === 'free' ? null : req.query.gateTier;
+    }
     if (req.query.featured === 'true') filter.featured = true;
     if (req.query.highlight === 'true') filter.highlight = true;
     if (req.query.keyStory === 'true') filter.keyStory = true;
@@ -316,7 +347,7 @@ export async function create(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, status, body, gateTier,
+    template, status, body, gateTier, publishDate,
     featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
@@ -326,10 +357,10 @@ export async function create(req: Request, res: Response) {
     ? await findActiveRegionIdsOrThrow(regionIds)
     : [(await getGlobalRegion())._id];
   const nextStatus = normalizeStatus(status);
-  const nextFeatured = nextStatus === 'published' && featured === true;
-  const nextHighlight = nextStatus === 'published' && highlight === true;
-  const nextKeyStory = nextStatus === 'published' && keyStory === true;
-  const nextTopStories = nextStatus === 'published' && topStories === true;
+  const nextFeatured = isLive(nextStatus) && featured === true;
+  const nextHighlight = isLive(nextStatus) && highlight === true;
+  const nextKeyStory = isLive(nextStatus) && keyStory === true;
+  const nextTopStories = isLive(nextStatus) && topStories === true;
   if (nextFeatured) await assertFeaturedLimit();
   if (nextHighlight) await assertHighlightLimit();
   if (nextKeyStory) await assertKeyStoryLimit();
@@ -348,8 +379,15 @@ export async function create(req: Request, res: Response) {
     featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl: audioUrl || undefined, audioKey: audioKey || undefined,
     template,
-    // Publish date is system-managed: stamped when published, absent for drafts.
-    publishDate: nextStatus === 'published' ? new Date() : undefined,
+    // Publish date is system-managed except when scheduling, where the caller
+    // names the future moment the cron should publish: stamped now when
+    // published, the caller's date when scheduled, absent otherwise.
+    publishDate:
+      nextStatus === 'published'
+        ? new Date()
+        : nextStatus === 'scheduled'
+          ? normalizeScheduledDate(publishDate)
+          : undefined,
     status: nextStatus, body: sanitizedBody, gateTier: nextGateTier,
     featured: nextFeatured, highlight: nextHighlight, keyStory: nextKeyStory, topStories: nextTopStories,
     readTimeMinutes: readTime,
@@ -369,7 +407,7 @@ export async function update(req: Request, res: Response) {
     title, excerpt, author_id,
     categoryId, regionIds, featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl, audioKey,
-    template, status, body, gateTier,
+    template, status, body, gateTier, publishDate,
     featured, highlight, keyStory, topStories, readTimeMinutes,
   } = req.body;
 
@@ -378,22 +416,24 @@ export async function update(req: Request, res: Response) {
 
   const nextStatus = normalizeStatus(status, current.status);
   const wasPublished = current.status === 'published';
-  const currentFeatured = current.status === 'published' ? current.featured : false;
-  const currentHighlight = current.status === 'published' ? current.highlight : false;
-  const currentKeyStory = current.status === 'published' ? current.keyStory : false;
+  const currentFeatured = isLive(current.status) ? current.featured : false;
+  const currentHighlight = isLive(current.status) ? current.highlight : false;
+  const currentKeyStory = isLive(current.status) ? current.keyStory : false;
   const nextFeatured =
-    nextStatus === 'published' ? (featured !== undefined ? featured === true : currentFeatured) : false;
+    isLive(nextStatus) ? (featured !== undefined ? featured === true : currentFeatured) : false;
   const nextHighlight =
-    nextStatus === 'published' ? (highlight !== undefined ? highlight === true : currentHighlight) : false;
+    isLive(nextStatus) ? (highlight !== undefined ? highlight === true : currentHighlight) : false;
   const nextKeyStory =
-    nextStatus === 'published' ? (keyStory !== undefined ? keyStory === true : currentKeyStory) : false;
-  const currentTopStories = current.status === 'published' ? current.topStories : false;
+    isLive(nextStatus) ? (keyStory !== undefined ? keyStory === true : currentKeyStory) : false;
+  const currentTopStories = isLive(current.status) ? current.topStories : false;
   const nextTopStories =
-    nextStatus === 'published' ? (topStories !== undefined ? topStories === true : currentTopStories) : false;
-  const shouldClearDraftFeatured = nextStatus === 'draft' && current.featured;
-  const shouldClearDraftHighlight = nextStatus === 'draft' && current.highlight;
-  const shouldClearDraftKeyStory = nextStatus === 'draft' && current.keyStory;
-  const shouldClearDraftTopStories = nextStatus === 'draft' && current.topStories;
+    isLive(nextStatus) ? (topStories !== undefined ? topStories === true : currentTopStories) : false;
+  // Leaving the live state (to draft, scheduled or archived) strips placement.
+  const leavesLive = !isLive(nextStatus);
+  const shouldClearDraftFeatured = leavesLive && current.featured;
+  const shouldClearDraftHighlight = leavesLive && current.highlight;
+  const shouldClearDraftKeyStory = leavesLive && current.keyStory;
+  const shouldClearDraftTopStories = leavesLive && current.topStories;
   const isRemovingAudio =
     audioUrl === null || audioUrl === '' || audioKey === null || audioKey === '';
   const shouldDeleteOldAudio =
@@ -438,11 +478,19 @@ export async function update(req: Request, res: Response) {
     else patch.audioKey = audioKey;
   }
   if (template !== undefined) patch.template = template;
-  // Publish date is system-managed by status: stamped the moment a draft goes
-  // live, and cleared whenever the article is a draft (even if it was published
-  // before). A published article that stays published keeps its original date.
-  if (nextStatus === 'draft') {
+  // Publish date follows status: stamped the moment an article goes live, set
+  // by the caller while scheduled, and cleared for draft/archived (even if the
+  // article was published before). A published article that stays published
+  // keeps its original date.
+  if (nextStatus === 'draft' || nextStatus === 'archived') {
     if (current.publishDate) unset.publishDate = 1;
+  } else if (nextStatus === 'scheduled') {
+    // Re-scheduling without naming a new date keeps the pending one; there is
+    // nothing to validate in that case beyond it still being in the future.
+    patch.publishDate =
+      publishDate !== undefined || current.status !== 'scheduled' || !current.publishDate
+        ? normalizeScheduledDate(publishDate)
+        : current.publishDate;
   } else if (!wasPublished) {
     patch.publishDate = new Date();
   }
@@ -486,6 +534,96 @@ export async function update(req: Request, res: Response) {
   }
 
   res.json(await serializeArticle(article!, ADMIN_AUDIENCE));
+}
+
+// POST /api/admin/articles/bulk
+//
+// Applies one action to a selection made in the admin table. Actions map onto
+// the same invariants the single-article handlers enforce:
+//   delete   — permanent, with the same index/summary/S3 cleanup as DELETE /:id
+//   status   — placement is stripped whenever the article leaves the live state,
+//              publishDate follows the status, and the RAG index is re-synced
+//   category — moves every selected article to one category
+//
+// Placement limits are deliberately not re-checked here: bulk status changes can
+// only ever clear placement flags (nothing in this handler sets one), so they
+// cannot push a category over its featured/highlight cap.
+export async function bulk(req: Request, res: Response) {
+  const { ids, action } = req.body as { ids?: unknown; action?: unknown };
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: 'ids must be a non-empty array' });
+  }
+  const objectIds = ids.filter((id): id is string => typeof id === 'string' && mongoose.isValidObjectId(id));
+  if (objectIds.length !== ids.length) return res.status(400).json({ error: 'invalid_article_id' });
+
+  const articles = await Article.find({ _id: { $in: objectIds } });
+  if (articles.length === 0) return res.status(404).json({ error: 'No articles found' });
+
+  if (action === 'delete') {
+    await Article.deleteMany({ _id: { $in: objectIds } });
+    await Promise.all(
+      articles.map(async (article) => {
+        await purgeArticleChunks(String(article._id));
+        await ArticleSummary.deleteOne({ articleId: article._id });
+        if (article.audioKey) {
+          await deleteS3Object(article.audioKey).catch((err) => {
+            console.warn('Failed to delete article audio from S3', err);
+          });
+        }
+      }),
+    );
+    return res.json({ action, affected: articles.length });
+  }
+
+  if (action === 'status') {
+    const nextStatus = normalizeStatus((req.body as { status?: unknown }).status);
+    const scheduledFor =
+      nextStatus === 'scheduled'
+        ? normalizeScheduledDate((req.body as { publishDate?: unknown }).publishDate)
+        : null;
+
+    await Promise.all(
+      articles.map(async (article) => {
+        const patch: Record<string, unknown> = { status: nextStatus };
+        const unset: Record<string, 1> = {};
+
+        if (!isLive(nextStatus)) {
+          patch.featured = false;
+          patch.highlight = false;
+          patch.keyStory = false;
+          patch.topStories = false;
+        }
+        if (nextStatus === 'draft' || nextStatus === 'archived') {
+          if (article.publishDate) unset.publishDate = 1;
+        } else if (nextStatus === 'scheduled') {
+          patch.publishDate = scheduledFor;
+        } else if (article.status !== 'published') {
+          patch.publishDate = new Date();
+        }
+
+        const updated = await Article.findByIdAndUpdate(
+          article._id,
+          Object.keys(unset).length > 0 ? { $set: patch, $unset: unset } : patch,
+          { new: true, runValidators: true },
+        );
+        if (updated!.status === 'published') await syncArticleEmbeddings(updated!);
+        else await purgeArticleChunks(String(updated!._id));
+      }),
+    );
+    return res.json({ action, status: nextStatus, affected: articles.length });
+  }
+
+  if (action === 'category') {
+    const categoryDoc = await findCategoryByIdOrThrow((req.body as { categoryId?: unknown }).categoryId);
+    await Article.updateMany(
+      { _id: { $in: objectIds } },
+      { $set: { categoryId: categoryDoc._id, category: categoryDoc.title } },
+    );
+    return res.json({ action, categoryId: String(categoryDoc._id), affected: articles.length });
+  }
+
+  return res.status(400).json({ error: 'invalid_action' });
 }
 
 // DELETE /api/admin/articles/:id
