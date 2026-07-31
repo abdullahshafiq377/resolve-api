@@ -24,7 +24,9 @@ import { issueWarning, issueCommentBan, liftCommentBan } from '../../services/co
 import { COMMENT_BAN_TIERS, type CommentBanTier } from '../../models/CommentBan';
 import BlockedKeyword, {
   BLOCKED_KEYWORD_LANGUAGES,
+  BLOCKED_KEYWORD_MATCH_MODES,
   type BlockedKeywordLanguage,
+  type BlockedKeywordMatchMode,
 } from '../../models/BlockedKeyword';
 import { invalidateBlockListCache } from '../../services/comments/blocklist';
 
@@ -75,6 +77,258 @@ export async function denyHeld(req: Request, res: Response) {
   if (comment.status !== 'held') throw httpError(400, 'not_held');
   await denyHeldComment(comment, userId as string);
   res.status(204).end();
+}
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Columns the moderation queue can be ordered by. `reason` and `comment` sort on
+// the fields the table actually renders, so the order always matches the page.
+const QUEUE_SORT_FIELDS: Record<string, string> = {
+  reports: 'reportCount',
+  comment: 'bodyText',
+  reason: 'reasonKey',
+  newest: 'createdAt',
+};
+
+/**
+ * GET /api/admin/comments/queue — one moderation list holding both halves of the
+ * queue: comments held by the block list and visible comments carrying at least
+ * one open report.
+ *
+ * A row's `reason` is the block list for held comments, and otherwise the reason
+ * on the *earliest* open report — the one that put the comment in the queue.
+ * Taking the earliest (rather than the most common) keeps the displayed reason
+ * and the `reason` sort in agreement.
+ */
+export async function listQueue(req: Request, res: Response) {
+  const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>, 10, 100);
+  const sortKey = typeof req.query.sort === 'string' ? req.query.sort : 'reports';
+  const sortField = QUEUE_SORT_FIELDS[sortKey] ?? QUEUE_SORT_FIELDS.reports;
+  const direction: 1 | -1 = req.query.order === 'asc' ? 1 : -1;
+  const statusFilter = typeof req.query.status === 'string' ? req.query.status : '';
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+
+  // Held comments are never `visible`, so the two halves of the queue are
+  // separated by comment status first and by the open-report count second.
+  const preMatch: Record<string, unknown> = {};
+  if (statusFilter === 'held') preMatch.status = 'held';
+  else if (statusFilter === 'reported') preMatch.status = 'visible';
+  else preMatch.status = { $in: ['held', 'visible'] };
+  if (search) preMatch.bodyText = { $regex: escapeRegex(search), $options: 'i' };
+
+  const postMatch =
+    statusFilter === 'held'
+      ? {}
+      : statusFilter === 'reported'
+        ? { reportCount: { $gt: 0 } }
+        : { $or: [{ status: 'held' }, { reportCount: { $gt: 0 } }] };
+
+  const [result] = await Comment.aggregate([
+    { $match: preMatch },
+    {
+      $lookup: {
+        from: CommentReport.collection.name,
+        let: { cid: '$_id' },
+        pipeline: [
+          {
+            $match: {
+              $expr: { $and: [{ $eq: ['$commentId', '$$cid'] }, { $eq: ['$status', 'open'] }] },
+            },
+          },
+          { $sort: { createdAt: 1 } },
+          { $project: { reason: 1, createdAt: 1 } },
+        ],
+        as: 'openReports',
+      },
+    },
+    {
+      $addFields: {
+        reportCount: { $size: '$openReports' },
+        queueStatus: { $cond: [{ $eq: ['$status', 'held'] }, 'held', 'reported'] },
+        reasonKey: {
+          $cond: [
+            { $eq: ['$status', 'held'] },
+            'keyword_match',
+            { $ifNull: [{ $arrayElemAt: ['$openReports.reason', 0] }, 'other'] },
+          ],
+        },
+      },
+    },
+    ...(Object.keys(postMatch).length ? [{ $match: postMatch }] : []),
+    {
+      $facet: {
+        items: [
+          // `_id` breaks ties so paging stays stable across requests.
+          { $sort: { [sortField]: direction, _id: 1 } },
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              bodyText: 1,
+              status: 1,
+              parentType: 1,
+              parentId: 1,
+              authorId: 1,
+              authorDisplayName: 1,
+              authorAvatarUrl: 1,
+              authorTier: 1,
+              createdAt: 1,
+              reportCount: 1,
+              queueStatus: 1,
+              reasonKey: 1,
+            },
+          },
+        ],
+        total: [{ $count: 'count' }],
+      },
+    },
+  ]);
+
+  const docs = (result?.items ?? []) as Array<Record<string, any>>;
+  const total = (result?.total?.[0]?.count ?? 0) as number;
+
+  // Public deep link per row, for the table's "open on site" action.
+  const items = await Promise.all(
+    docs.map(async (doc) => {
+      const parent = await resolveParentState(doc.parentType, String(doc.parentId));
+      return {
+        id: String(doc._id),
+        bodyText: doc.bodyText as string,
+        status: doc.queueStatus as 'held' | 'reported',
+        reason: doc.reasonKey as string,
+        reportCount: doc.reportCount as number,
+        author: {
+          userId: doc.authorId as string,
+          displayName: doc.authorDisplayName as string,
+          avatarUrl: (doc.authorAvatarUrl ?? null) as string | null,
+          tier: doc.authorTier as string,
+        },
+        parentType: doc.parentType as string,
+        parentTitle: parent.title,
+        link: parent.found
+          ? `${parentPath(doc.parentType, parent.slug)}#comment-${String(doc._id)}`
+          : null,
+        createdAt: (doc.createdAt as Date).toISOString(),
+      };
+    }),
+  );
+
+  res.json({
+    items,
+    pagination: { total, page, limit, pages: Math.max(1, Math.ceil(total / limit)) },
+  });
+}
+
+const BULK_ACTIONS = ['approve', 'remove', 'mark_safe', 'warn', 'ban'] as const;
+type BulkAction = (typeof BULK_ACTIONS)[number];
+
+/** Cap on one bulk call, so a runaway selection can't fan out unbounded writes. */
+const BULK_LIMIT = 100;
+
+/**
+ * POST /api/admin/comments/bulk — apply one moderation action to a selection.
+ *
+ * `approve` publishes held comments and dismisses any open reports; `remove`
+ * blanks the comment and resolves its reports as removed; `mark_safe` only
+ * dismisses reports; `warn` and `ban` act on the comments' authors, deduplicated
+ * so one author is never warned or banned twice in a single call.
+ */
+export async function bulkModerate(req: Request, res: Response) {
+  const { userId } = getAuth(req);
+  const actorId = userId as string;
+  const body = (req.body ?? {}) as {
+    ids?: unknown;
+    action?: unknown;
+    reason?: unknown;
+    tier?: unknown;
+  };
+
+  if (!Array.isArray(body.ids) || body.ids.length === 0) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'ids', reason: 'required' } });
+  }
+  if (body.ids.length > BULK_LIMIT) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'ids', reason: 'too_many' } });
+  }
+  if (typeof body.action !== 'string' || !BULK_ACTIONS.includes(body.action as BulkAction)) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'action', reason: 'invalid' } });
+  }
+  const action = body.action as BulkAction;
+  const reason = typeof body.reason === 'string' && body.reason.trim() ? body.reason.trim() : null;
+
+  if (action === 'warn' && !reason) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'reason', reason: 'required' } });
+  }
+  if (action === 'ban' && (typeof body.tier !== 'string' || !COMMENT_BAN_TIERS.includes(body.tier as CommentBanTier))) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'tier', reason: 'invalid' } });
+  }
+
+  const ids = (body.ids as unknown[])
+    .filter((id): id is string => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id));
+  const comments = await Comment.find({ _id: { $in: ids } });
+  if (!comments.length) throw httpError(404, 'comment_not_found');
+
+  let affected = 0;
+  let skipped = 0;
+
+  // Author-level actions run once per author, whatever the selection looks like.
+  if (action === 'warn' || action === 'ban') {
+    const seen = new Map<string, string>();
+    for (const comment of comments) {
+      if (!seen.has(comment.authorId)) seen.set(comment.authorId, String(comment._id));
+    }
+    for (const [authorId, commentId] of seen) {
+      if (action === 'warn') await issueWarning(authorId, actorId, reason as string, commentId);
+      else await issueCommentBan(authorId, actorId, body.tier as CommentBanTier, reason, commentId);
+      affected += 1;
+    }
+    return res.json({ action, affected, skipped });
+  }
+
+  for (const comment of comments) {
+    const parent = await resolveParentState(comment.parentType, String(comment.parentId));
+    const link = `${parentPath(comment.parentType, parent.slug)}#comment-${String(comment._id)}`;
+    const commentId = comment._id as mongoose.Types.ObjectId;
+
+    if (action === 'approve') {
+      if (comment.status === 'held') await approveHeldComment(comment, actorId);
+      else if (comment.status !== 'visible') {
+        skipped += 1;
+        continue;
+      }
+      await resolveReports(commentId, actorId, 'resolved_no_action', link);
+      affected += 1;
+      continue;
+    }
+
+    if (action === 'remove') {
+      if (comment.status === 'removed' || comment.status === 'deleted_by_user') {
+        skipped += 1;
+        continue;
+      }
+      await removeComment(comment, actorId, reason);
+      await resolveReports(commentId, actorId, 'resolved_removed', link);
+      affected += 1;
+      continue;
+    }
+
+    // mark_safe — dismiss the reports, leave the comment exactly as it is.
+    await resolveReports(commentId, actorId, 'resolved_no_action', link);
+    affected += 1;
+  }
+
+  res.json({ action, affected, skipped });
 }
 
 const REPORT_SORTS: Record<string, Record<string, 1 | -1>> = {
@@ -277,6 +531,7 @@ function serializeKeyword(k: {
   _id: unknown;
   term: string;
   language: string;
+  matchMode?: string;
   addedBy: string;
   addedAt: Date;
   removedAt: Date | null;
@@ -288,6 +543,8 @@ function serializeKeyword(k: {
     id: String(k._id),
     term: k.term,
     language: k.language,
+    // Rows added before the field existed read as the default.
+    matchMode: k.matchMode ?? 'word',
     addedBy: k.addedBy,
     addedAt: k.addedAt.toISOString(),
     removedAt: k.removedAt ? k.removedAt.toISOString() : null,
@@ -321,7 +578,12 @@ export async function listKeywords(req: Request, res: Response) {
 // POST /api/admin/comments/keywords — add a block-list term.
 export async function addKeyword(req: Request, res: Response) {
   const { userId } = getAuth(req);
-  const body = (req.body ?? {}) as { term?: string; language?: string; reason?: string };
+  const body = (req.body ?? {}) as {
+    term?: string;
+    language?: string;
+    reason?: string;
+    matchMode?: string;
+  };
   const term = typeof body.term === 'string' ? body.term.trim().toLowerCase() : '';
   if (!term) {
     return res.status(400).json({ error: 'validation_error', details: { field: 'term', reason: 'required' } });
@@ -329,12 +591,18 @@ export async function addKeyword(req: Request, res: Response) {
   if (typeof body.language !== 'string' || !BLOCKED_KEYWORD_LANGUAGES.includes(body.language as BlockedKeywordLanguage)) {
     return res.status(400).json({ error: 'validation_error', details: { field: 'language', reason: 'invalid' } });
   }
+  if (body.matchMode !== undefined && !BLOCKED_KEYWORD_MATCH_MODES.includes(body.matchMode as BlockedKeywordMatchMode)) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'matchMode', reason: 'invalid' } });
+  }
   const existing = await BlockedKeyword.findOne({ term, isActive: true });
   if (existing) return res.status(409).json({ error: 'keyword_exists' });
 
   const doc = await BlockedKeyword.create({
     term,
     language: body.language as BlockedKeywordLanguage,
+    matchMode: (body.matchMode as BlockedKeywordMatchMode) ?? 'word',
     addedBy: userId as string,
     addedAt: new Date(),
     reason: body.reason ?? null,

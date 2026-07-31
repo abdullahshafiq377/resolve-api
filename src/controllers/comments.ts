@@ -271,12 +271,28 @@ export async function editComment(req: Request, res: Response) {
   const previousMentionIds = new Set(comment.mentions.map((m) => m.userId));
   const mentions = await resolveMentions(prepared.value.bodyText, auth.userId);
 
+  // Re-run the block list on edit. Without this a clean comment could be posted
+  // and then edited into anything at all inside the 5-minute edit window, which
+  // bypassed moderation entirely.
+  const wasVisible = comment.status === 'visible';
+  const held = await isBlocked(prepared.value.bodyText);
+
   comment.body = prepared.value.body;
   comment.bodyText = prepared.value.bodyText;
   comment.mentions = mentions;
   comment.edited = true;
   comment.editedAt = new Date();
+  if (held && wasVisible) {
+    comment.status = 'held';
+    comment.visibleAt = null;
+  }
   await comment.save();
+
+  // Pull the now-held comment back out of the counts, mirroring the delete path.
+  if (held && wasVisible) {
+    await adjustParentCommentCount(comment.parentType, String(comment.parentId), -1);
+    if (comment.level > 0) await adjustReplyCount(comment.rootCommentId, -1);
+  }
 
   // Notify only newly-added mentions.
   const newMentions = mentions.filter((m) => !previousMentionIds.has(m.userId));
@@ -296,7 +312,12 @@ export async function editComment(req: Request, res: Response) {
     ).catch(() => {});
   }
 
-  res.json({ comment: serializePublicComment(comment, { userVotes: new Map() }) });
+  res.json({
+    comment: serializePublicComment(comment, { userVotes: new Map() }),
+    // Same shape as create, so the composer can show the generic held notice.
+    // Still no indication of which term matched.
+    status: comment.status,
+  });
 }
 
 // DELETE /api/comments/:id — author delete (soft if it has replies, else hard).

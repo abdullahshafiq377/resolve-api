@@ -2,6 +2,8 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { requireModerator } from '../../middleware/auth';
 import {
+  listQueue,
+  bulkModerate,
   listHeld,
   approveHeld,
   denyHeld,
@@ -25,6 +27,10 @@ const wrap =
 router.use(requireModerator);
 
 router.get('/stats', wrap(stats));
+// The unified moderation queue behind the admin table. Registered above the
+// /:id routes so 'queue' and 'bulk' are never read as comment ids.
+router.get('/queue', wrap(listQueue));
+router.post('/bulk', wrap(bulkModerate));
 router.get('/held', wrap(listHeld));
 router.post('/:id/approve', wrap(approveHeld));
 router.post('/:id/deny', wrap(denyHeld));
