@@ -10,10 +10,11 @@ import {
   type AuthorSummary,
 } from '../../services/users';
 import { httpError } from '../../utils/errors';
-import ResearchRequest from '../../models/ResearchRequest';
-import ResearchRequestVote from '../../models/ResearchRequestVote';
 import { invalidateBanCache } from '../../middleware/requireNotBanned';
+import { purgeUserResearchData } from '../../services/userResearchCascade';
+import { invalidateAdminUserCache } from '../../services/adminUsers';
 import { userHistory, postWarning, postBan, postLiftBan } from '../../controllers/admin/comments';
+import { bulkUsers, listUsers } from '../../controllers/admin/users';
 
 const router = express.Router();
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
@@ -36,38 +37,13 @@ async function assertNotPrivileged(targetId: string): Promise<void> {
   }
 }
 
-// Hard-delete a user's research-request votes and decrement the affected counters,
-// and silently delete their still-pending submissions. Used on ban + account delete
-// so a removed user leaves no orphan votes (Research Requests data-model contract).
-async function purgeUserResearchData(clerkUserId: string): Promise<void> {
-  const votes = await ResearchRequestVote.find({ userId: clerkUserId }).select('requestId');
-  const requestIds = [...new Set(votes.map((v) => String(v.requestId)))];
+// GET /api/admin/users — merged users index: Clerk identity joined with tier,
+// comment bans and warnings, filtered/sorted/paginated (moderator-or-above).
+router.get('/', requireModerator, wrap(listUsers));
 
-  await ResearchRequestVote.deleteMany({ userId: clerkUserId });
-  for (const requestId of requestIds) {
-    await ResearchRequest.updateOne({ _id: requestId }, { $inc: { voteCount: -1 } });
-  }
-  // Clamp any counter that may have gone negative due to races.
-  await ResearchRequest.updateMany({ voteCount: { $lt: 0 } }, { $set: { voteCount: 0 } });
-
-  // Their never-approved submissions are removed silently.
-  await ResearchRequest.deleteMany({ submitterId: clerkUserId, approvedAt: null });
-}
-
-// GET /api/admin/users — list users (moderator-or-above)
-router.get(
-  '/',
-  requireModerator,
-  wrap(async (req, res) => {
-    const { query, limit = '20', offset = '0' } = req.query as Record<string, string | undefined>;
-    const result = await clerk.users.getUserList({
-      query: query || undefined,
-      limit: Number(limit),
-      offset: Number(offset),
-    });
-    res.json({ data: result.data, totalCount: result.totalCount });
-  }),
-);
+// POST /api/admin/users/bulk — one moderation action over a selection. Registered
+// above the /:id routes so 'bulk' is never read as a user id.
+router.post('/bulk', requireModerator, wrap(bulkUsers));
 
 // GET /api/admin/users/moderators — selectable article authors (moderator-or-above).
 // Includes the env-derived super admin plus all active role='moderator' users.
@@ -127,6 +103,7 @@ router.post(
     const updated = await clerk.users.updateUserMetadata(req.params.id, {
       publicMetadata: { role: nextRole },
     });
+    invalidateAdminUserCache(req.params.id);
     res.json(updated);
   }),
 );
@@ -141,6 +118,7 @@ router.post(
     // Research Requests cascade: drop their votes (decrement counters) + pending requests.
     await purgeUserResearchData(req.params.id);
     invalidateBanCache(req.params.id);
+    invalidateAdminUserCache(req.params.id);
     res.json({ ok: true });
   }),
 );
@@ -153,6 +131,7 @@ router.post(
     await assertNotPrivileged(req.params.id);
     await clerk.users.unbanUser(req.params.id);
     invalidateBanCache(req.params.id);
+    invalidateAdminUserCache(req.params.id);
     res.json({ ok: true });
   }),
 );
@@ -171,6 +150,7 @@ router.delete(
     await softDeleteUser(req.params.id);
     // Research Requests cascade: drop their votes + pending submissions.
     await purgeUserResearchData(req.params.id);
+    invalidateAdminUserCache(req.params.id);
     res.status(204).end();
   }),
 );
