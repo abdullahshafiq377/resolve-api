@@ -5,7 +5,7 @@
 // search. Kept deliberately simple (regex, not a text index) — the picker asks
 // for a handful of results, not ranked full-text.
 
-import Article from '../models/Article';
+import Article, { type GateTier } from '../models/Article';
 import Short from '../models/Short';
 import Category from '../models/Category';
 import ResearchRequest from '../models/ResearchRequest';
@@ -25,6 +25,8 @@ export interface SearchResult {
   title: string;
   slug?: string;
   subtitle?: string;
+  /** Articles only: minimum plan needed to read past the gate; null = open. */
+  gateTier?: GateTier | null;
 }
 
 // Escape user input so it's matched literally inside a RegExp.
@@ -43,7 +45,7 @@ async function searchArticles(rx: RegExp, limit: number): Promise<SearchResult[]
   const docs = await Article.find({ status: 'published', $or: [{ title: rx }, { excerpt: rx }] })
     .sort({ publishDate: -1 })
     .limit(limit)
-    .select('title slug excerpt')
+    .select('title slug excerpt gateTier')
     .lean();
   return docs.map((d) => ({
     type: 'article',
@@ -51,6 +53,12 @@ async function searchArticles(rx: RegExp, limit: number): Promise<SearchResult[]
     title: d.title,
     slug: d.slug,
     subtitle: snippet(d.excerpt),
+    // Which plan a reader needs to get past this article's gate, or null when it
+    // is open. Published metadata, not content — it is already on every article
+    // card and hero. The AI-chat attach picker uses it to refuse a locked article
+    // up front rather than letting the reader compose a question that the chat
+    // endpoint would only reject afterwards.
+    gateTier: d.gateTier ?? null,
   }));
 }
 

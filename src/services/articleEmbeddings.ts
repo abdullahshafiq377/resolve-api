@@ -3,34 +3,30 @@ import mongoose from 'mongoose';
 import type { ArticleDoc } from '../models/Article';
 import Article from '../models/Article';
 import ArticleChunk from '../models/ArticleChunk';
-import { embed } from '../lib/gemini';
-import { embed as embedVoyage } from '../lib/voyage';
+import { embed } from '../lib/voyage';
 import { extractGatedPlainText, chunkText } from '../lib/articleText';
 import { tierAtLeast, type PlanTier } from '../middleware/auth';
 
-// Name of the Atlas Vector Search index serving retrieval.
+// Name of the Atlas Vector Search index serving retrieval, and the document path
+// it is built on.
 //
-// Flipped to the Voyage index on 30 July 2026 (migration plan W4, cutover step
-// 4) after the backfill covered all 95 chunks and a side-by-side comparison put
-// the same article at #1 on 8/8 representative queries. The Gemini index and
-// `embedding` field still exist and are still dual-written, so reverting is a
-// two-line change back to the v1 constants below.
-export const VECTOR_INDEX = 'article_chunks_vector_v2';
+// Kept as two constants beside each other because they must always move
+// together: there are three consumers (searchChunks, probeLockedHits,
+// scripts/createVectorIndex.ts), and changing the index without changing the
+// path — or updating only one query site — fails silently rather than loudly.
+// Atlas will happily run a $vectorSearch against an index that does not match
+// the path and return nothing, so retrieval would look healthy while the
+// gate-notice probe queried the wrong vectors. See FINDINGS AI2, and the guard
+// test in vectorIndex.test.ts.
+//
+// Voyage (1024d) has been the only generation since the Gemini teardown
+// (migration plan W4, cutover step 6). The cutover's `embeddingV2` / `_v2` names
+// were renamed back to the plain ones on 3 August 2026, during the article
+// reseed — with the corpus purged there was nothing to keep serving, so it
+// needed no dual-index dance. See FINDINGS AI11.
+export const VECTOR_INDEX = 'article_chunks_vector';
+export const VECTOR_PATH = 'embedding';
 
-// Document path the index is built on. Kept beside VECTOR_INDEX because the two
-// must always move together: there are three consumers (searchChunks,
-// probeLockedHits, scripts/createVectorIndex.ts), and changing the index without
-// changing the path — or updating only one query site — fails silently rather
-// than loudly. Retrieval would keep working while the gate-notice probe queried
-// the wrong vectors. See FINDINGS AI2.
-export const VECTOR_PATH = 'embeddingV2';
-
-// The two indexes, named explicitly. Both exist at once because Atlas treats
-// `numDimensions` as immutable, so Gemini's 768 and Voyage's 1024 cannot share
-// one. VECTOR_INDEX / VECTOR_PATH above are what retrieval actually reads and
-// now point at v2; these named constants are what `createVectorIndex.ts` builds
-// and what a rollback would point back at. They are kept until cutover step 6
-// drops the Gemini column and index for good.
 // True when Atlas is telling us the index already exists, so the caller should
 // update its definition in place instead of failing.
 //
@@ -44,11 +40,6 @@ export function isIndexAlreadyExistsError(message: string): boolean {
   // in some driver messages, so it is matched separately from the prose forms.
   return /already ?exists|already defined|Duplicate Index/i.test(message);
 }
-
-export const VECTOR_INDEX_V1 = 'article_chunks_vector';
-export const VECTOR_PATH_V1 = 'embedding';
-export const VECTOR_INDEX_V2 = 'article_chunks_vector_v2';
-export const VECTOR_PATH_V2 = 'embeddingV2';
 
 const TIER_ORDER: PlanTier[] = ['free', 'standard', 'premium'];
 
@@ -64,13 +55,14 @@ function hashText(text: string): string {
 // Rebuild one published article's chunks + embeddings. Idempotent.
 //
 // - Skips entirely when the body's plain text is unchanged (bodyHash), so
-//   metadata-only edits / re-saves don't burn Gemini calls.
+//   metadata-only edits / re-saves don't burn embedding calls.
 // - Upserts by (articleId, chunkIndex) and deletes only now-surplus higher
 //   indices, so the old vectors keep serving until the new ones are written
 //   (no "search gap" where the article silently drops out of retrieval).
 //
 // Cost scales with edits, never with corpus size. Safe to call fire-and-forget;
-// it never throws — failures are logged so an article save is never blocked by Gemini.
+// it never throws — failures are logged so an article save is never blocked by the
+// embedding provider.
 export async function syncArticleEmbeddings(
   article: Pick<ArticleDoc, '_id' | 'slug' | 'body' | 'bodyHash' | 'gateTier' | 'title' | 'publishDate'>,
 ): Promise<void> {
@@ -111,28 +103,11 @@ export async function syncArticleEmbeddings(
       ...chunkText(post).map((text) => ({ text, requiredTier: (gateTier ?? 'free') as PlanTier })),
     ];
     const texts = parts.map((p) => p.text);
-    const vectors = await embed(texts, 'RETRIEVAL_DOCUMENT');
-
-    // Dual-write during the cutover (migration plan W4, step 3): articles
-    // published or edited mid-migration must land in BOTH indexes, or they are
-    // invisible to whichever one is not yet serving reads.
-    //
-    // A Voyage failure must not take the live path down with it. `embedding` is
-    // what serves every read until the flip, so a failure here degrades the
-    // not-yet-live index only — the article still publishes and still retrieves.
-    // The gap it leaves is closed by re-running the backfill, which is
-    // idempotent and skips chunks that already have a v2 vector.
-    let vectorsV2: number[][] | null = null;
-    try {
-      vectorsV2 = await embedVoyage(texts, 'document');
-    } catch (err) {
-      console.error(
-        '[embeddings] voyage dual-write failed for article',
-        String(articleId),
-        (err as Error).message,
-        '— gemini vectors written; re-run backfill:embeddings to fill the gap',
-      );
-    }
+    // A failure here aborts the sync: the outer catch logs it and `bodyHash` is
+    // left unwritten, so the next save of this article retries the whole thing.
+    // Publishing is not blocked — the article goes live, it is just not
+    // retrievable until the embed succeeds.
+    const vectors = await embed(texts, 'document');
 
     // Upsert each chunk in place (no delete-then-insert gap).
     const ops = parts.map((part, i) => ({
@@ -144,8 +119,7 @@ export async function syncArticleEmbeddings(
             title: article.title,
             publishDate: article.publishDate ?? null,
             text: part.text,
-            embedding: vectors[i],
-            ...(vectorsV2 ? { embeddingV2: vectorsV2[i] } : {}),
+            [VECTOR_PATH]: vectors[i],
             requiredTier: part.requiredTier,
           },
         },
@@ -232,10 +206,10 @@ export interface LockedHit {
 const GATE_NOTICE_TOP_N = 3;
 
 async function embedQuery(query: string): Promise<number[] | null> {
-  // Must match whatever VECTOR_PATH points at: a 768d Gemini vector against the
-  // 1024d Voyage index is a hard failure, and querying the right index with the
-  // wrong *task type* is a soft one — it retrieves, just worse.
-  const [queryVector] = await embedVoyage([query], 'query');
+  // Must match whatever VECTOR_PATH points at: a vector of the wrong dimension
+  // is a hard failure against Atlas, and querying the right index with the wrong
+  // *task type* is a soft one — it retrieves, just worse.
+  const [queryVector] = await embed([query], 'query');
   return queryVector ?? null;
 }
 

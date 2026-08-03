@@ -21,10 +21,11 @@
     "migrate:ai-summary": "tsx src/scripts/migrateAiSummary.ts",
     "migrate:chat-message-model": "tsx src/scripts/migrateChatMessageModel.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
-    "backfill:embeddings-v2": "tsx src/scripts/backfillEmbeddingsV2.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts",
-    "test": "tsx --test \"src/**/*.test.ts\""
+    "check:narration": "tsx src/scripts/checkAnswerNarration.ts",
+    "reseed:schedule": "tsx src/scripts/reseedArticleSchedule.ts",
+    "test": "tsx --test --experimental-test-module-mocks \"src/**/*.test.ts\""
   },
   "keywords": [],
   "author": "",
@@ -38,7 +39,6 @@
     "@aws-sdk/s3-request-presigner": "^3.1045.0",
     "@clerk/backend": "^3.4.14",
     "@clerk/express": "^2.1.22",
-    "@google/genai": "^2.8.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",

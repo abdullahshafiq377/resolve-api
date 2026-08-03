@@ -15,19 +15,16 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  VECTOR_INDEX,
-  VECTOR_PATH,
-  VECTOR_INDEX_V1,
-  VECTOR_PATH_V1,
-  VECTOR_INDEX_V2,
-  VECTOR_PATH_V2,
-  isIndexAlreadyExistsError,
-} from './articleEmbeddings';
-import { EMBED_DIM as GEMINI_DIM } from '../lib/gemini';
-import { EMBED_DIM as VOYAGE_DIM } from '../lib/voyage';
+import { VECTOR_INDEX, VECTOR_PATH, isIndexAlreadyExistsError } from './articleEmbeddings';
+import { EMBED_DIM } from '../lib/voyage';
+
+// The interim names the dual-index cutover used. The Gemini generation they
+// replaced is gone (W4 step 6), and the plain names were reclaimed during the
+// 3 August 2026 reseed — so a reappearance of these means a half-reverted rename.
+const INTERIM_INDEX = 'article_chunks_vector_v2';
+const INTERIM_PATH = 'embeddingV2';
 
 const SRC = join(__dirname, '..');
 
@@ -79,39 +76,44 @@ test('the vector index name and path have exactly one definition', async (t) => 
     }
   });
 
-  await t.test('the active index and path are a matching pair, never mixed', () => {
-    // Reading the v2 index at the v1 path (or vice versa) returns nothing rather
-    // than erroring — the exact silent failure this file exists to prevent.
-    const pairs = [
-      [VECTOR_INDEX_V1, VECTOR_PATH_V1],
-      [VECTOR_INDEX_V2, VECTOR_PATH_V2],
-    ];
-    assert.ok(
-      pairs.some(([index, path]) => VECTOR_INDEX === index && VECTOR_PATH === path),
-      `VECTOR_INDEX '${VECTOR_INDEX}' and VECTOR_PATH '${VECTOR_PATH}' are from different generations`,
-    );
-  });
-
-  await t.test('the query embedder matches the generation being queried', () => {
-    // A query vector of the wrong dimension is a hard failure against Atlas, and
-    // the two providers disagree on dimension — so the embedder used by
-    // embedQuery has to track whichever index VECTOR_PATH points at.
-    const body = code('services/articleEmbeddings.ts');
-    const queryCall = body.match(/const \[queryVector\] = await (\w+)\(/);
-    assert.ok(queryCall, 'could not find the query embedding call');
-    const embedder = queryCall[1];
-
-    if (VECTOR_PATH === VECTOR_PATH_V2) {
-      assert.equal(embedder, 'embedVoyage', `v2 index must be queried with Voyage (${VOYAGE_DIM}d)`);
-    } else {
-      assert.equal(embedder, 'embed', `v1 index must be queried with Gemini (${GEMINI_DIM}d)`);
+  await t.test('no half-reverted rename', () => {
+    // Pointing at one generation's index and the other's path returns nothing
+    // rather than erroring, so retrieval would look healthy while answering from
+    // an empty result set. That is the failure mode this file exists for.
+    assert.notEqual(VECTOR_INDEX, INTERIM_INDEX);
+    assert.notEqual(VECTOR_PATH, INTERIM_PATH);
+    for (const file of [...CONSUMERS, 'models/ArticleChunk.ts']) {
+      assert.doesNotMatch(
+        code(file),
+        new RegExp(`(^|[^\\w])${INTERIM_PATH}\\s*[:.]`, 'm'),
+        `${file} still references the interim '${INTERIM_PATH}' field`,
+      );
     }
   });
 
-  await t.test('the two generations do not share a dimension', () => {
-    // If they ever did, one index could serve both and the dual-index dance
-    // would be unnecessary complexity worth deleting.
-    assert.notEqual(GEMINI_DIM, VOYAGE_DIM);
+  await t.test('the Gemini client is gone and nothing imports it', () => {
+    // The teardown deletes lib/gemini.ts outright. An import surviving it would
+    // not fail the build only if the file came back — this asserts both halves.
+    assert.equal(
+      existsSync(join(SRC, 'lib/gemini.ts')),
+      false,
+      'lib/gemini.ts is back — Voyage is meant to be the only generation',
+    );
+    for (const file of [...CONSUMERS, 'services/articleEmbeddings.ts']) {
+      assert.doesNotMatch(code(file), /from '.*lib\/gemini'/, `${file} still imports lib/gemini`);
+    }
+  });
+
+  await t.test('the query embedder is the one that produced the index', () => {
+    // With only one generation left, the thing worth asserting is no longer
+    // "which provider" but that the query path and the stored vectors share a
+    // provider and therefore a dimension. A mismatch is a hard Atlas failure.
+    const body = code('services/articleEmbeddings.ts');
+    const queryCall = body.match(/const \[queryVector\] = await (\w+)\(/);
+    assert.ok(queryCall, 'could not find the query embedding call');
+    assert.equal(queryCall[1], 'embed');
+    assert.match(body, /import \{ embed \} from '\.\.\/lib\/voyage'/);
+    assert.equal(EMBED_DIM, 1024);
   });
 
   await t.test('every $vectorSearch stage in the service uses both constants', () => {

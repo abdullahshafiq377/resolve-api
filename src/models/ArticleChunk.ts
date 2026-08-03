@@ -3,7 +3,7 @@ import type { PlanTier } from '../middleware/auth';
 
 const TIERS: PlanTier[] = ['free', 'standard', 'premium'];
 
-// A ~800-token slice of a published article's plain text plus its Gemini
+// A ~800-token slice of a published article's plain text plus its Voyage
 // embedding (Phase 2 RAG). One article -> many chunks, keyed by chunkIndex.
 // Retrieval runs `$vectorSearch` over `embedding` via the Atlas index
 // `article_chunks_vector` (see scripts/createVectorIndex.ts / aichatbackend.md).
@@ -13,12 +13,10 @@ export interface ArticleChunkDoc extends Document {
   slug: string;
   chunkIndex: number;
   text: string;
+  // Voyage vector, 1024d. The 768d Gemini vector that previously held this name
+  // was dropped in the W4 step 6 teardown; the interim `embeddingV2` name was
+  // renamed back during the 3 August 2026 article reseed (FINDINGS AI11).
   embedding: number[];
-  // Voyage vector (1024d), written alongside `embedding` during the Phase 2
-  // dual-index cutover. Optional until the backfill completes and the read path
-  // flips; `embedding` keeps serving every read until then. Both are dropped to
-  // one field at the end of the cutover — see the migration plan's W4.
-  embeddingV2?: number[];
   // Denormalised from Article so retrieval can attribute a passage and weigh how
   // old it is (directive §2 and §4) without a per-query $lookup. `slug` above is
   // the precedent. Kept fresh by syncArticleEmbeddings, which already runs on
@@ -43,7 +41,6 @@ const ArticleChunkSchema = new Schema<ArticleChunkDoc>(
     text: { type: String, required: true },
     // Stored as a plain number[]; the Atlas vectorSearch index lives on this path.
     embedding: { type: [Number], required: true },
-    embeddingV2: { type: [Number], required: false },
     title: { type: String, required: false },
     publishDate: { type: Date, required: false, default: null },
     requiredTier: { type: String, enum: TIERS, required: true, default: 'free' },

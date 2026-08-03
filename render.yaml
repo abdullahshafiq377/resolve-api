@@ -79,23 +79,19 @@ services:
         value: claude-sonnet-5
 
       # ── Gemini ────────────────────────────────────────────────
-      # Only the embedding dual-write is still Gemini; chat, Brief and Summary
-      # have all moved to Claude, and the v1 vectors survive as a rollback target
-      # until the Phase 3 teardown. GEMINI_CHAT_MODEL* are read by nothing that
-      # serves a request — only by scripts/migrateChatMessageModel.ts, to map
-      # legacy ChatMessage.model values. That migration has already run.
-      - key: GEMINI_API_KEY
-        sync: false
+      # No Gemini remains on any request path — generation is Claude, retrieval is
+      # Voyage, and lib/gemini.ts was deleted in the Phase 3 teardown. These three
+      # are read only by scripts/migrateChatMessageModel.ts, which maps legacy
+      # ChatMessage.model values back to a Resolve key. That migration has already
+      # run and the script carries the same defaults, so they can go once you are
+      # confident no unmigrated rows remain. GEMINI_API_KEY is gone — revoke the
+      # key in Google Cloud if nothing else uses it.
       - key: GEMINI_CHAT_MODEL
         value: gemini-flash-latest
       - key: GEMINI_CHAT_MODEL_THINKING
         value: gemini-2.5-flash
       - key: GEMINI_CHAT_MODEL_PRO
         value: gemini-2.5-pro
-      - key: GEMINI_EMBED_MODEL
-        value: gemini-embedding-001
-      - key: GEMINI_EMBED_DIM
-        value: "768"
 
       # ── Embeddings (Voyage) ───────────────────────────────────
       # Anthropic ships no embeddings endpoint. Runs alongside Gemini during the

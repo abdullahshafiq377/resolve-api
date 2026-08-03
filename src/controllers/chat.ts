@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
-import Article from '../models/Article';
+import Article, { type GateTier } from '../models/Article';
 import ChatUsage from '../models/ChatUsage';
 import Conversation, { ConversationDoc } from '../models/Conversation';
 import ChatMessage from '../models/ChatMessage';
@@ -132,7 +132,9 @@ You sound the way Resolve writes.
 - Your position is clear but not stated. Inform; do not lecture.
 - Confidence lives in how strongly you assert a claim, calibrated by the rules above, not in a shift of tone. Your voice is the same whether the answer comes from Resolve's reporting or the wider web.
 - Use plain language and explain specialist terms where a reader would need it. Your job is to help people go deeper, not to show your working.
-- Prefer short paragraphs. Do not use markdown headings.`;
+- Prefer short paragraphs. Do not use markdown headings.
+- Open with the answer, never with an account of how you are going to get it. You have tools; the reader does not need to hear about them. Do not write "I'll search for…", "Let me check…", "Now I have enough to…", "Based on my searches…", or any similar narration of your own process — not at the start, not between searches, not anywhere. The reader sees a separate indicator while you search; your text should read as though the answer arrived whole.
+- If a tool fails or you hit an internal limit, do not describe the mechanism. Say what you can and cannot tell them in plain editorial terms — "I could not confirm the latest figure" — never "I am hitting a search limit" or anything naming your own machinery.`;
 
 // Directive §4 requires the AI to reason from the actual current date, and the
 // worked example is timezone-sensitive: Resolve covers Pakistan, so "today" means
@@ -463,7 +465,12 @@ export async function postChat(req: Request, res: Response): Promise<void> {
     // full body would hand back exactly what the gate withholds.
     const { body: readableBody, locked } = clipBodyForTier(article.body, article.gateTier ?? null, tier);
     if (locked) {
-      // Nothing to ground in, so don't spend a model call to say so.
+      // Refused outright, not clipped to the free preamble. A reader who cannot
+      // read the article cannot ask about it either — grounding on the preamble
+      // would make the AI a way around the gate, and answering "I can only see
+      // the opening" is a worse experience than an upgrade offer. Product
+      // decision, 3 August 2026. The clients mirror it (`lockedArticleGate`)
+      // and show the upgrade modal instead of sending; this is the enforcement.
       res.status(403).json({
         error: 'article_gated',
         requiredTier: article.gateTier,
@@ -790,6 +797,7 @@ export async function getConversationDetail(req: Request, res: Response): Promis
     res.status(404).json({ error: 'not_found' });
     return;
   }
+  const tier = getTier(auth);
 
   // Ownership-checked: a conversation only resolves for its owner.
   const conversation = await Conversation.findOne({
@@ -808,11 +816,25 @@ export async function getConversationDetail(req: Request, res: Response): Promis
     .sort({ seq: 1, createdAt: 1, _id: 1 })
     .lean();
 
+  // A thread can outlive the reader's access to the article it is about: a plan
+  // lapses, or an editor gates a story that was open when the thread started.
+  // Resolved here rather than by the client, which would have to re-derive
+  // entitlement from Clerk and re-fetch the article to do it. `locked` is the
+  // same decision `postChat` makes on the next send — sent up front so the
+  // client can offer the upgrade instead of composing a message into a 403.
+  let articleAccess: { gateTier: GateTier | null; locked: boolean } | undefined;
+  if (conversation.articleId) {
+    const article = await Article.findById(conversation.articleId).select('gateTier').lean();
+    const gateTier = article?.gateTier ?? null;
+    articleAccess = { gateTier, locked: gateTier !== null && !tierAtLeast(tier, gateTier) };
+  }
+
   res.json({
     id: String(conversation._id),
     title: conversation.title,
     scope: conversation.scope,
     articleId: conversation.articleId ? String(conversation.articleId) : undefined,
+    ...(articleAccess ? { articleAccess } : {}),
     messages: messages.map((m) => ({
       role: m.role,
       content: m.content,
