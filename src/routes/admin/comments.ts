@@ -13,7 +13,9 @@ import {
   stats,
   listKeywords,
   addKeyword,
+  updateKeyword,
   removeKeyword,
+  bulkKeywords,
 } from '../../controllers/admin/comments';
 
 const router = express.Router();
@@ -40,6 +42,9 @@ router.post('/:id/resolve', wrap(resolveReport));
 
 router.get('/keywords', wrap(listKeywords));
 router.post('/keywords', wrap(addKeyword));
+// Above /keywords/:id so 'bulk' is never read as a keyword id.
+router.post('/keywords/bulk', wrap(bulkKeywords));
+router.patch('/keywords/:id', wrap(updateKeyword));
 router.delete('/keywords/:id', wrap(removeKeyword));
 
 export default router;

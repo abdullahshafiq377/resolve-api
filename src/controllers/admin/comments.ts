@@ -11,6 +11,8 @@ import { parsePagination } from '../../services/researchRequests';
 import {
   serializeAdminComment,
   serializePublicComment,
+  loadCommentAuthors,
+  loadAuthorIdentities,
 } from '../../lib/serializers/comment';
 import { resolveParentState, parentPath } from '../../services/comments/parents';
 import { getActiveCommentBan } from '../../services/comments/bans';
@@ -55,8 +57,9 @@ export async function listHeld(req: Request, res: Response) {
     Comment.find(filter).sort({ createdAt: 1 }).skip(skip).limit(limit),
     Comment.countDocuments(filter),
   ]);
+  const authors = await loadCommentAuthors(docs);
   res.json({
-    items: docs.map(serializeAdminComment),
+    items: docs.map((c) => serializeAdminComment(c, authors)),
     pagination: { total, page, limit, pages: Math.ceil(total / limit) },
   });
 }
@@ -67,7 +70,7 @@ export async function approveHeld(req: Request, res: Response) {
   const comment = await loadComment(req.params.id);
   if (comment.status !== 'held') throw httpError(400, 'not_held');
   await approveHeldComment(comment, userId as string);
-  res.json({ comment: serializeAdminComment(comment) });
+  res.json({ comment: serializeAdminComment(comment, await loadCommentAuthors([comment])) });
 }
 
 // POST /api/admin/comments/:id/deny — hard-delete a held comment.
@@ -189,10 +192,16 @@ export async function listQueue(req: Request, res: Response) {
   const docs = (result?.items ?? []) as Array<Record<string, any>>;
   const total = (result?.total?.[0]?.count ?? 0) as number;
 
+  // This list is built by aggregation rather than through the serializer, so the
+  // mirror join has to be repeated here — the projected author fields are the
+  // post-time snapshot and go stale when a member changes their avatar or name.
+  const identities = await loadAuthorIdentities(docs.map((doc) => doc.authorId as string));
+
   // Public deep link per row, for the table's "open on site" action.
   const items = await Promise.all(
     docs.map(async (doc) => {
       const parent = await resolveParentState(doc.parentType, String(doc.parentId));
+      const live = identities.get(doc.authorId as string);
       return {
         id: String(doc._id),
         bodyText: doc.bodyText as string,
@@ -201,8 +210,8 @@ export async function listQueue(req: Request, res: Response) {
         reportCount: doc.reportCount as number,
         author: {
           userId: doc.authorId as string,
-          displayName: doc.authorDisplayName as string,
-          avatarUrl: (doc.authorAvatarUrl ?? null) as string | null,
+          displayName: live?.displayName ?? (doc.authorDisplayName as string),
+          avatarUrl: live ? live.avatarUrl : ((doc.authorAvatarUrl ?? null) as string | null),
           tier: doc.authorTier as string,
         },
         parentType: doc.parentType as string,
@@ -380,7 +389,7 @@ export async function listReports(req: Request, res: Response) {
     const names = await displayNameMap(recent.map((r) => r.reporterId));
 
     items.push({
-      comment: serializeAdminComment(comment),
+      comment: serializeAdminComment(comment, await loadCommentAuthors([comment])),
       reportCount: g.reportCount as number,
       reasons,
       latestReportAt: (g.latestReportAt as Date).toISOString(),
@@ -404,7 +413,7 @@ export async function reportDetail(req: Request, res: Response) {
   const reports = await CommentReport.find({ commentId: comment._id }).sort({ createdAt: -1 }).lean();
   const names = await displayNameMap(reports.map((r) => r.reporterId));
   res.json({
-    comment: serializeAdminComment(comment),
+    comment: serializeAdminComment(comment, await loadCommentAuthors([comment])),
     reports: reports.map((r) => ({
       id: String(r._id),
       reporter: { userId: r.reporterId, displayName: names.get(r.reporterId) ?? 'Resolve reader' },
@@ -455,7 +464,10 @@ export async function resolveReport(req: Request, res: Response) {
     await removeComment(comment, actorId, reason);
     await resolveReports(comment._id as mongoose.Types.ObjectId, actorId, 'resolved_removed', link);
     return res.json({
-      comment: serializePublicComment(comment, { userVotes: new Map() }),
+      comment: serializePublicComment(comment, {
+        userVotes: new Map(),
+        authors: await loadCommentAuthors([comment]),
+      }),
       ...result,
     });
   }
@@ -527,50 +539,109 @@ export async function stats(_req: Request, res: Response) {
   });
 }
 
-function serializeKeyword(k: {
-  _id: unknown;
-  term: string;
-  language: string;
-  matchMode?: string;
-  addedBy: string;
-  addedAt: Date;
-  removedAt: Date | null;
-  removedBy: string | null;
-  reason: string | null;
-  isActive: boolean;
-}) {
+interface KeywordAuthor {
+  userId: string;
+  displayName: string;
+  avatarUrl: string | null;
+}
+
+function serializeKeyword(
+  k: {
+    _id: unknown;
+    term: string;
+    language: string;
+    matchMode?: string;
+    addedBy: string;
+    addedAt: Date;
+    removedAt: Date | null;
+    removedBy: string | null;
+    isActive: boolean;
+    hitCount?: number;
+    lastHitAt?: Date | null;
+  },
+  authors?: Map<string, KeywordAuthor>,
+) {
   return {
     id: String(k._id),
     term: k.term,
     language: k.language,
     // Rows added before the field existed read as the default.
     matchMode: k.matchMode ?? 'word',
-    addedBy: k.addedBy,
+    // The table shows who added a term, so the raw Clerk id is resolved against
+    // the local user mirror. An id with no mirror row still renders as a person.
+    addedBy: authors?.get(k.addedBy) ?? {
+      userId: k.addedBy,
+      displayName: 'Resolve moderator',
+      avatarUrl: null,
+    },
     addedAt: k.addedAt.toISOString(),
     removedAt: k.removedAt ? k.removedAt.toISOString() : null,
     removedBy: k.removedBy,
-    reason: k.reason,
     isActive: k.isActive,
+    hitCount: k.hitCount ?? 0,
+    lastHitAt: k.lastHitAt ? k.lastHitAt.toISOString() : null,
   };
 }
 
-// GET /api/admin/comments/keywords — block-list entries (filter by language/status).
+/** Clerk id -> display name + avatar, for the block list's "Added by" column. */
+async function keywordAuthorMap(userIds: string[]): Promise<Map<string, KeywordAuthor>> {
+  const map = new Map<string, KeywordAuthor>();
+  const unique = [...new Set(userIds)];
+  if (!unique.length) return map;
+  const users = await User.find({ clerkUserId: { $in: unique } })
+    .select('clerkUserId displayName imageUrl')
+    .lean();
+  for (const u of users) {
+    map.set(u.clerkUserId, {
+      userId: u.clerkUserId,
+      displayName: u.displayName || 'Resolve moderator',
+      avatarUrl: u.imageUrl ?? null,
+    });
+  }
+  return map;
+}
+
+// Columns the block-list table can be ordered by, mapped to the field each one
+// actually renders so the order always matches the page.
+const KEYWORD_SORT_FIELDS: Record<string, string> = {
+  term: 'term',
+  hits: 'hitCount',
+  lastHit: 'lastHitAt',
+  added: 'addedAt',
+};
+
+// GET /api/admin/comments/keywords — block-list entries.
+// Filters on language and status, searches the term, and sorts on any of the
+// table's sortable columns.
 export async function listKeywords(req: Request, res: Response) {
   const { page, limit, skip } = parsePagination(req.query as Record<string, unknown>, 50, 200);
   const filter: Record<string, unknown> = {};
   if (typeof req.query.language === 'string' && BLOCKED_KEYWORD_LANGUAGES.includes(req.query.language as BlockedKeywordLanguage)) {
     filter.language = req.query.language;
   }
-  const status = typeof req.query.status === 'string' ? req.query.status : 'active';
+  // Terms are paused rather than removed now, so the status filter reads as
+  // active/inactive. `removed` is still accepted as the old name for inactive.
+  const status = typeof req.query.status === 'string' ? req.query.status : '';
   if (status === 'active') filter.isActive = true;
-  else if (status === 'removed') filter.isActive = false;
+  else if (status === 'inactive' || status === 'removed') filter.isActive = false;
+
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  if (search) filter.term = { $regex: escapeRegex(search), $options: 'i' };
+
+  const sortField =
+    KEYWORD_SORT_FIELDS[typeof req.query.sort === 'string' ? req.query.sort : ''] ?? 'addedAt';
+  const direction = req.query.order === 'asc' ? 1 : -1;
+  // `addedAt` breaks ties so paging stays stable when a column has repeats.
+  const sort: Record<string, 1 | -1> =
+    sortField === 'addedAt' ? { addedAt: direction } : { [sortField]: direction, addedAt: -1 };
 
   const [docs, total] = await Promise.all([
-    BlockedKeyword.find(filter).sort({ addedAt: -1 }).skip(skip).limit(limit).lean(),
+    BlockedKeyword.find(filter).sort(sort).skip(skip).limit(limit).lean(),
     BlockedKeyword.countDocuments(filter),
   ]);
+  const authors = await keywordAuthorMap(docs.map((d) => d.addedBy));
   res.json({
-    items: docs.map(serializeKeyword),
+    items: docs.map((doc) => serializeKeyword(doc, authors)),
     pagination: { total, page, limit, pages: Math.ceil(total / limit) },
   });
 }
@@ -581,7 +652,6 @@ export async function addKeyword(req: Request, res: Response) {
   const body = (req.body ?? {}) as {
     term?: string;
     language?: string;
-    reason?: string;
     matchMode?: string;
   };
   const term = typeof body.term === 'string' ? body.term.trim().toLowerCase() : '';
@@ -596,7 +666,10 @@ export async function addKeyword(req: Request, res: Response) {
       .status(400)
       .json({ error: 'validation_error', details: { field: 'matchMode', reason: 'invalid' } });
   }
-  const existing = await BlockedKeyword.findOne({ term, isActive: true });
+  // Terms are unique across the whole list, not just its active half: a paused
+  // term still occupies the name, and re-adding it would leave two rows fighting
+  // over one word. Reactivate the existing row instead.
+  const existing = await BlockedKeyword.findOne({ term });
   if (existing) return res.status(409).json({ error: 'keyword_exists' });
 
   const doc = await BlockedKeyword.create({
@@ -605,27 +678,132 @@ export async function addKeyword(req: Request, res: Response) {
     matchMode: (body.matchMode as BlockedKeywordMatchMode) ?? 'word',
     addedBy: userId as string,
     addedAt: new Date(),
-    reason: body.reason ?? null,
     isActive: true,
   });
   invalidateBlockListCache();
   res.status(201).json({ id: String(doc._id) });
 }
 
-// DELETE /api/admin/comments/keywords/:id — soft-delete a term.
-export async function removeKeyword(req: Request, res: Response) {
+// PATCH /api/admin/comments/keywords/:id — edit a term, or pause/resume it.
+// Pausing takes a term out of matching without losing its hit history, which is
+// what the table's Active switch does.
+export async function updateKeyword(req: Request, res: Response) {
   const { userId } = getAuth(req);
   if (!mongoose.Types.ObjectId.isValid(req.params.id)) throw httpError(404, 'keyword_not_found');
   const doc = await BlockedKeyword.findById(req.params.id);
   if (!doc) throw httpError(404, 'keyword_not_found');
-  if (doc.isActive) {
-    doc.isActive = false;
-    doc.removedAt = new Date();
-    doc.removedBy = userId as string;
-    await doc.save();
-    invalidateBlockListCache();
+
+  const body = (req.body ?? {}) as {
+    term?: string;
+    language?: string;
+    matchMode?: string;
+    isActive?: boolean;
+  };
+
+  if (body.term !== undefined) {
+    const term = typeof body.term === 'string' ? body.term.trim().toLowerCase() : '';
+    if (!term) {
+      return res
+        .status(400)
+        .json({ error: 'validation_error', details: { field: 'term', reason: 'required' } });
+    }
+    if (term !== doc.term) {
+      const clash = await BlockedKeyword.findOne({ term, _id: { $ne: doc._id } });
+      if (clash) return res.status(409).json({ error: 'keyword_exists' });
+      doc.term = term;
+    }
   }
+
+  if (body.language !== undefined) {
+    if (!BLOCKED_KEYWORD_LANGUAGES.includes(body.language as BlockedKeywordLanguage)) {
+      return res
+        .status(400)
+        .json({ error: 'validation_error', details: { field: 'language', reason: 'invalid' } });
+    }
+    doc.language = body.language as BlockedKeywordLanguage;
+  }
+
+  if (body.matchMode !== undefined) {
+    if (!BLOCKED_KEYWORD_MATCH_MODES.includes(body.matchMode as BlockedKeywordMatchMode)) {
+      return res
+        .status(400)
+        .json({ error: 'validation_error', details: { field: 'matchMode', reason: 'invalid' } });
+    }
+    doc.matchMode = body.matchMode as BlockedKeywordMatchMode;
+  }
+
+  if (body.isActive !== undefined) {
+    if (typeof body.isActive !== 'boolean') {
+      return res
+        .status(400)
+        .json({ error: 'validation_error', details: { field: 'isActive', reason: 'invalid' } });
+    }
+    doc.isActive = body.isActive;
+    // removedAt/removedBy now read as "paused at, by whom".
+    doc.removedAt = body.isActive ? null : new Date();
+    doc.removedBy = body.isActive ? null : (userId as string);
+  }
+
+  await doc.save();
+  invalidateBlockListCache();
+  const authors = await keywordAuthorMap([doc.addedBy]);
+  res.json(serializeKeyword(doc.toObject(), authors));
+}
+
+// DELETE /api/admin/comments/keywords/:id — permanently remove a term.
+// Deleting is final; a term that should only stop matching for now is paused
+// through PATCH instead.
+export async function removeKeyword(req: Request, res: Response) {
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) throw httpError(404, 'keyword_not_found');
+  const result = await BlockedKeyword.deleteOne({ _id: req.params.id });
+  if (!result.deletedCount) throw httpError(404, 'keyword_not_found');
+  invalidateBlockListCache();
   res.status(204).end();
+}
+
+const KEYWORD_BULK_ACTIONS = ['activate', 'deactivate', 'delete'] as const;
+type KeywordBulkAction = (typeof KEYWORD_BULK_ACTIONS)[number];
+
+// POST /api/admin/comments/keywords/bulk — apply one action to a selection.
+export async function bulkKeywords(req: Request, res: Response) {
+  const { userId } = getAuth(req);
+  const body = (req.body ?? {}) as { ids?: unknown; action?: unknown };
+  const action = body.action as KeywordBulkAction;
+  if (!KEYWORD_BULK_ACTIONS.includes(action)) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'action', reason: 'invalid' } });
+  }
+  const ids = Array.isArray(body.ids)
+    ? body.ids.filter(
+        (id): id is string => typeof id === 'string' && mongoose.Types.ObjectId.isValid(id),
+      )
+    : [];
+  if (!ids.length) {
+    return res
+      .status(400)
+      .json({ error: 'validation_error', details: { field: 'ids', reason: 'required' } });
+  }
+
+  let affected = 0;
+  if (action === 'delete') {
+    affected = (await BlockedKeyword.deleteMany({ _id: { $in: ids } })).deletedCount ?? 0;
+  } else {
+    const isActive = action === 'activate';
+    const result = await BlockedKeyword.updateMany(
+      { _id: { $in: ids } },
+      {
+        $set: {
+          isActive,
+          removedAt: isActive ? null : new Date(),
+          removedBy: isActive ? null : (userId as string),
+        },
+      },
+    );
+    affected = result.modifiedCount ?? 0;
+  }
+  invalidateBlockListCache();
+  res.json({ action, affected, skipped: ids.length - affected });
 }
 
 // GET /api/admin/users/:userId/comment-history — interleaved feed.
@@ -642,8 +820,13 @@ export async function userHistory(req: Request, res: Response) {
 
   type HistoryItem = { at: string; kind: string; [k: string]: unknown };
   const items: HistoryItem[] = [];
+  const authors = await loadCommentAuthors(comments);
   for (const c of comments) {
-    items.push({ kind: 'comment', at: c.createdAt.toISOString(), comment: serializeAdminComment(c) });
+    items.push({
+      kind: 'comment',
+      at: c.createdAt.toISOString(),
+      comment: serializeAdminComment(c, authors),
+    });
   }
   for (const a of actions) {
     items.push({

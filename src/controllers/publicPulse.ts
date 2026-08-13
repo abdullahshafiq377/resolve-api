@@ -11,7 +11,7 @@ import Article from '../models/Article';
 import { httpError } from '../utils/errors';
 import { bodyContainsPublicPulse } from '../services/publicPulse/body';
 import { runPublicPulseTransitions } from '../services/publicPulse/lifecycle';
-import { serializePublicPoll, serializeResults } from '../services/publicPulse/serializers';
+import { canSeeTally, serializePublicPoll, serializeResults } from '../services/publicPulse/serializers';
 
 const MAX_LIMIT = 50;
 
@@ -46,6 +46,25 @@ async function viewerVote(userId: string | null | undefined, pollId: mongoose.Ty
   return PollVote.findOne({ pollId, userId });
 }
 
+/**
+ * The viewer's own vote for each of a page of polls, keyed by poll id.
+ *
+ * Every list endpoint needs this now, not just the ones that flag the reader's
+ * choice on a card: the serializer withholds an open poll's tally from a
+ * viewer who has not voted, so a list that does not resolve the viewer's votes
+ * would hide the numbers from readers who are entitled to them.
+ */
+async function viewerVotesByPoll(
+  userId: string | null | undefined,
+  polls: PollDoc[],
+): Promise<Map<string, string>> {
+  const voteByPoll = new Map<string, string>();
+  if (!userId || !polls.length) return voteByPoll;
+  const votes = await PollVote.find({ pollId: { $in: polls.map((poll) => poll._id) }, userId });
+  votes.forEach((vote) => voteByPoll.set(String(vote.pollId), String(vote.optionId)));
+  return voteByPoll;
+}
+
 async function withTransaction<T>(fn: (session: mongoose.ClientSession) => Promise<T>): Promise<T> {
   const session = await mongoose.startSession();
   try {
@@ -64,11 +83,12 @@ function isDuplicateKey(err: unknown): boolean {
   return (err as { code?: number }).code === 11000;
 }
 
-// GET /api/public-pulse — active polls.
-export async function listActive(req: Request, res: Response) {
+// GET /api/public-pulse — open polls.
+export async function listOpen(req: Request, res: Response) {
   await syncDueTransitions();
+  const { userId } = getAuth(req);
   const { page, limit, skip } = parsePagination(req.query);
-  const filter: Record<string, unknown> = { status: 'active' };
+  const filter: Record<string, unknown> = { status: 'open' };
   if (typeof req.query.categorySlug === 'string' && req.query.categorySlug) {
     filter.categorySlug = req.query.categorySlug;
   }
@@ -76,25 +96,22 @@ export async function listActive(req: Request, res: Response) {
     Poll.find(filter).sort({ publishedAt: -1, createdAt: -1 }).skip(skip).limit(limit),
     Poll.countDocuments(filter),
   ]);
-  res.json({ data: polls.map((poll) => serializePublicPoll(poll)), pagination: pagination(total, page, limit) });
+  const voteByPoll = await viewerVotesByPoll(userId, polls);
+  res.json({
+    data: polls.map((poll) => serializePublicPoll(poll, voteByPoll.get(String(poll._id)) ?? null)),
+    pagination: pagination(total, page, limit),
+  });
 }
 
-// GET /api/public-pulse/featured — active polls flagged featured (single column on the public page).
+// GET /api/public-pulse/featured — open polls flagged featured (single column on the public page).
 export async function listFeatured(req: Request, res: Response) {
   await syncDueTransitions();
   const { userId } = getAuth(req);
-  const polls = await Poll.find({ status: 'active', featured: true })
+  const polls = await Poll.find({ status: 'open', featured: true })
     .sort({ publishedAt: -1, createdAt: -1 })
     .limit(POLL_FEATURED_MAX);
 
-  const voteByPoll = new Map<string, string>();
-  if (userId && polls.length) {
-    const votes = await PollVote.find({
-      pollId: { $in: polls.map((poll) => poll._id) },
-      userId,
-    });
-    votes.forEach((vote) => voteByPoll.set(String(vote.pollId), String(vote.optionId)));
-  }
+  const voteByPoll = await viewerVotesByPoll(userId, polls);
 
   res.json({
     data: polls.map((poll) =>
@@ -119,14 +136,7 @@ export async function listRecent(req: Request, res: Response) {
 
   // When signed in, attach the viewer's vote per poll so closed cards can flag
   // the reader's own choice (mirrors listFeatured).
-  const voteByPoll = new Map<string, string>();
-  if (userId && polls.length) {
-    const votes = await PollVote.find({
-      pollId: { $in: polls.map((poll) => poll._id) },
-      userId,
-    });
-    votes.forEach((vote) => voteByPoll.set(String(vote.pollId), String(vote.optionId)));
-  }
+  const voteByPoll = await viewerVotesByPoll(userId, polls);
 
   res.json({
     data: polls.map((poll) => serializePublicPoll(poll, voteByPoll.get(String(poll._id)) ?? null)),
@@ -162,10 +172,16 @@ export async function getOne(req: Request, res: Response) {
 // GET /api/public-pulse/:slugOrId/results
 export async function getResults(req: Request, res: Response) {
   await syncDueTransitions();
+  const { userId } = getAuth(req);
   const poll = await findPoll(req.params.slugOrId);
   if (!poll || poll.status === 'draft') return res.status(404).json({ error: 'not_found' });
-  res.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=15');
-  res.json(serializeResults(poll));
+  const vote = await viewerVote(userId, poll._id as mongoose.Types.ObjectId);
+  const reveal = canSeeTally(poll, vote ? String(vote.optionId) : null);
+  // The response now depends on who is asking, so it can no longer sit in a
+  // shared cache — that would serve one reader's revealed tally to the next
+  // reader, defeating the rule this endpoint is enforcing.
+  res.set('Cache-Control', 'private, no-store');
+  res.json(serializeResults(poll, reveal));
 }
 
 // GET /api/public-pulse/:slugOrId/my-vote
@@ -219,11 +235,11 @@ async function writeVote(req: Request, res: Response) {
       const payload = await withTransaction(async (session) => {
         const poll = await findPoll(req.params.slugOrId, session);
         if (!poll) throw httpError(404, 'not_found');
-        if (poll.status === 'active' && poll.closeDate <= now) {
+        if (poll.status === 'open' && poll.closeDate <= now) {
           throw httpError(410, 'gone');
         }
         if (poll.status === 'closed') throw httpError(410, 'gone');
-        if (poll.status !== 'active') throw httpError(409, 'invalid_state');
+        if (poll.status !== 'open') throw httpError(409, 'invalid_state');
 
         const option = poll.options.find((candidate) => String(candidate._id) === optionId);
         if (!option) throw httpError(400, 'invalid_input');
@@ -235,7 +251,7 @@ async function writeVote(req: Request, res: Response) {
         if (!existing) {
           await PollVote.create([{ pollId, userId, optionId: nextOption }], { session });
           const updatedCounters = await Poll.updateOne(
-            { _id: pollId, status: 'active', closeDate: { $gt: now } },
+            { _id: pollId, status: 'open', closeDate: { $gt: now } },
             { $inc: { totalVotes: 1, [`optionVoteCounts.${optionId}`]: 1 } },
             { session },
           );
@@ -245,7 +261,7 @@ async function writeVote(req: Request, res: Response) {
           existing.optionId = nextOption;
           await existing.save({ session });
           const updatedCounters = await Poll.updateOne(
-            { _id: pollId, status: 'active', closeDate: { $gt: now } },
+            { _id: pollId, status: 'open', closeDate: { $gt: now } },
             { $inc: { [`optionVoteCounts.${previous}`]: -1, [`optionVoteCounts.${optionId}`]: 1 } },
             { session },
           );

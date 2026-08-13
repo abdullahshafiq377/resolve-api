@@ -36,7 +36,11 @@ import {
   cursorFor,
   getUserVotes,
 } from '../services/comments/listing';
-import { serializePublicComment, PUBLIC_LIST_STATUSES } from '../lib/serializers/comment';
+import {
+  serializePublicComment,
+  loadCommentAuthors,
+  PUBLIC_LIST_STATUSES,
+} from '../lib/serializers/comment';
 
 function parseParent(req: Request): { parentType: CommentParentType; parentId: string } {
   const parentType = req.query.parentType;
@@ -100,10 +104,13 @@ export async function listComments(req: Request, res: Response) {
     : [];
 
   const all = [...pageRoots, ...replies];
-  const userVotes = await getUserVotes(
-    userId,
-    all.map((c) => c._id as mongoose.Types.ObjectId),
-  );
+  const [userVotes, authors] = await Promise.all([
+    getUserVotes(
+      userId,
+      all.map((c) => c._id as mongoose.Types.ObjectId),
+    ),
+    loadCommentAuthors(all),
+  ]);
 
   const nextCursor =
     hasMore && pageRoots.length
@@ -111,7 +118,7 @@ export async function listComments(req: Request, res: Response) {
       : null;
 
   res.json({
-    items: all.map((c) => serializePublicComment(c, { userVotes })),
+    items: all.map((c) => serializePublicComment(c, { userVotes, authors })),
     nextCursor,
     // Cursor mode: total intentionally omitted (use GET /api/comments/count).
     total: null,
@@ -237,7 +244,10 @@ export async function createComment(req: Request, res: Response) {
   }
 
   res.status(201).json({
-    comment: serializePublicComment(doc, { userVotes: new Map() }),
+    comment: serializePublicComment(doc, {
+      userVotes: new Map(),
+      authors: await loadCommentAuthors([doc]),
+    }),
     status,
   });
 }
@@ -313,14 +323,19 @@ export async function editComment(req: Request, res: Response) {
   }
 
   res.json({
-    comment: serializePublicComment(comment, { userVotes: new Map() }),
+    comment: serializePublicComment(comment, {
+      userVotes: new Map(),
+      authors: await loadCommentAuthors([comment]),
+    }),
     // Same shape as create, so the composer can show the generic held notice.
     // Still no indication of which term matched.
     status: comment.status,
   });
 }
 
-// DELETE /api/comments/:id — author delete (soft if it has replies, else hard).
+// DELETE /api/comments/:id — author delete. Always soft: the row survives as a
+// "deleted by the user" placeholder at every level, so thread structure and the
+// reader's sense of the conversation stay intact.
 export async function deleteComment(req: Request, res: Response) {
   const auth = getAuth(req);
   if (!auth.userId) return res.status(401).json({ error: 'not_authenticated' });
@@ -333,19 +348,13 @@ export async function deleteComment(req: Request, res: Response) {
   }
 
   const wasVisible = comment.status === 'visible';
-  const hasReplies = await Comment.exists({ parentCommentId: comment._id });
 
-  if (hasReplies) {
-    // Soft delete: keep the row as a placeholder, blank the content + identity.
-    comment.status = 'deleted_by_user';
-    comment.body = { type: 'doc', content: [] };
-    comment.bodyText = '';
-    comment.mentions = [];
-    await comment.save();
-  } else {
-    await Comment.deleteOne({ _id: comment._id });
-    await CommentVote.deleteMany({ commentId: comment._id });
-  }
+  // Keep the row as a placeholder, blank the content + identity.
+  comment.status = 'deleted_by_user';
+  comment.body = { type: 'doc', content: [] };
+  comment.bodyText = '';
+  comment.mentions = [];
+  await comment.save();
 
   // Counter upkeep: any visible comment counts toward the parent; replies count
   // toward their root.

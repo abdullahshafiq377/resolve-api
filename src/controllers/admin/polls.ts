@@ -10,15 +10,27 @@ import Poll, {
   POLL_QUESTION_MAX,
   POLL_QUESTION_MIN,
   type PollDoc,
-  type PollResultsMode,
 } from '../../models/Poll';
 import PollVote from '../../models/PollVote';
 import Article from '../../models/Article';
 import Category from '../../models/Category';
-import { isSuperAdmin } from '../../middleware/auth';
 import { generateUniquePollSlug } from '../../services/publicPulse/slug';
 import { bodyContainsPublicPulse } from '../../services/publicPulse/body';
+import { parseOrder, parseSortKey, searchRegex, stableSort } from '../../utils/query';
 import { serializeAdminPoll, serializeResults } from '../../services/publicPulse/serializers';
+import {
+  ACTIVITY_DEFAULT_LIMIT,
+  listActivity,
+  purgeActivity,
+  recordActivities,
+  recordActivity,
+} from '../../services/activity';
+import {
+  buildPollUpdateActivity,
+  diffPollStatus,
+  snapshotPoll,
+  toPollActivity,
+} from '../../services/pollActivity';
 
 const MAX_LIMIT = 100;
 
@@ -102,6 +114,18 @@ async function loadOr404(req: Request, res: Response): Promise<PollDoc | null> {
   return poll;
 }
 
+// Columns the admin polls table can be ordered by.
+const POLL_SORT_KEYS = ['question', 'votes', 'submitted', 'updatedAt'] as const;
+const POLL_SORT_FIELDS: Record<(typeof POLL_SORT_KEYS)[number], string> = {
+  question: 'question',
+  votes: 'totalVotes',
+  submitted: 'createdAt',
+  updatedAt: 'updatedAt',
+};
+
+// Case- and accent-insensitive ordering for the text columns.
+const LIST_COLLATION = { locale: 'en', strength: 2 } as const;
+
 export async function listPolls(req: Request, res: Response) {
   const { userId } = getAuth(req);
   const { page, limit, skip } = parsePagination(req.query);
@@ -113,12 +137,20 @@ export async function listPolls(req: Request, res: Response) {
     filter.categoryId = new mongoose.Types.ObjectId(req.query.categoryId);
   }
   if (req.query.mine === 'true' && userId) filter.createdBy = userId;
-  if (typeof req.query.search === 'string' && req.query.search.trim()) {
-    filter.question = { $regex: req.query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
-  }
+  const term = searchRegex(req.query.search);
+  if (term) filter.question = term;
+
+  // The table's sortable columns, ordered server-side across the whole
+  // collection rather than within the page the client happens to hold.
+  const sortKey = parseSortKey(req.query.sort, POLL_SORT_KEYS, 'updatedAt');
+  const order = parseOrder(req.query.order, sortKey === 'question' ? 1 : -1);
 
   const [polls, total] = await Promise.all([
-    Poll.find(filter).sort({ updatedAt: -1 }).skip(skip).limit(limit),
+    Poll.find(filter)
+      .collation(LIST_COLLATION)
+      .sort(stableSort(POLL_SORT_FIELDS[sortKey], order))
+      .skip(skip)
+      .limit(limit),
     Poll.countDocuments(filter),
   ]);
   res.json({ data: polls.map(serializeAdminPoll), pagination: pagination(total, page, limit) });
@@ -129,11 +161,6 @@ export async function createPoll(req: Request, res: Response) {
   if (!userId) return res.status(401).json({ error: 'unauthorized' });
   const normalized = normalizeDefinition(req.body as Record<string, unknown>);
   if ('details' in normalized) return res.status(400).json({ error: 'validation_error', details: normalized.details });
-
-  const resultsMode = req.body.resultsMode as PollResultsMode | undefined;
-  if (resultsMode && resultsMode !== 'hidden_until_vote' && resultsMode !== 'always_visible') {
-    return res.status(400).json({ error: 'validation_error', details: [{ field: 'resultsMode', message: 'Invalid results mode.' }] });
-  }
 
   // Category is required for new polls (mirrors the Article editorial flow).
   const category = await resolveCategoryOr400(req.body.categoryId, res);
@@ -146,13 +173,20 @@ export async function createPoll(req: Request, res: Response) {
     slug,
     options: normalized.options!.map((text, order) => ({ _id: new mongoose.Types.ObjectId(), text, order })),
     closeDate: normalized.closeDate,
-    resultsMode: resultsMode ?? 'hidden_until_vote',
     status: 'draft',
     categoryId: category._id,
     category: category.title,
     categorySlug: category.slug,
     createdBy: userId,
     lastEditedBy: userId,
+  });
+
+  await recordActivity({
+    entityType: 'poll',
+    entityId: poll._id as mongoose.Types.ObjectId,
+    action: 'created',
+    actorId: userId,
+    metadata: { status: poll.status },
   });
 
   res.status(201).json(serializeAdminPoll(poll));
@@ -169,18 +203,18 @@ export async function updatePoll(req: Request, res: Response) {
   const poll = await loadOr404(req, res);
   if (!poll) return;
   if (poll.status === 'closed') return res.status(400).json({ error: 'invalid_state_transition' });
-  if (req.body.resultsMode !== undefined && req.body.resultsMode !== poll.resultsMode) {
-    return res.status(400).json({ error: 'results_mode_locked' });
-  }
 
   const normalized = normalizeDefinition(req.body as Record<string, unknown>, poll);
   if ('details' in normalized) return res.status(400).json({ error: 'validation_error', details: normalized.details });
-  if (poll.status === 'active' && normalized.closeDate <= new Date()) {
-    return res.status(400).json({ error: 'validation_error', details: [{ field: 'closeDate', message: 'closeDate must be in the future for an active poll.' }] });
+  if (poll.status === 'open' && normalized.closeDate <= new Date()) {
+    return res.status(400).json({ error: 'validation_error', details: [{ field: 'closeDate', message: 'closeDate must be in the future for an open poll.' }] });
   }
-  if (poll.status === 'active' && normalized.closeDate < poll.closeDate && req.body.confirmCloseDateShorten !== true) {
+  if (poll.status === 'open' && normalized.closeDate < poll.closeDate && req.body.confirmCloseDateShorten !== true) {
     return res.status(400).json({ error: 'validation_error', details: { confirmationRequired: true, field: 'closeDate' } });
   }
+
+  // Read the fields the timeline diffs before any of them are overwritten.
+  const before = snapshotPoll(poll);
 
   if (req.body.categoryId !== undefined) {
     const category = await resolveCategoryOr400(req.body.categoryId, res);
@@ -204,7 +238,45 @@ export async function updatePoll(req: Request, res: Response) {
     }));
   }
 
+  // Display order alone, by option id. Unlike an `options` edit this touches no
+  // text and mints no ids, so a tally keyed on those ids stays intact — which is
+  // why it is allowed after voting has started.
+  if (req.body.optionOrder !== undefined) {
+    const orderIds = Array.isArray(req.body.optionOrder)
+      ? (req.body.optionOrder as unknown[]).map((value) => String(value))
+      : null;
+    const currentIds = poll.options.map((option) => String(option._id));
+    const isPermutation =
+      orderIds !== null &&
+      orderIds.length === currentIds.length &&
+      new Set(orderIds).size === orderIds.length &&
+      orderIds.every((id) => currentIds.includes(id));
+    if (!isPermutation) {
+      return res.status(400).json({
+        error: 'validation_error',
+        details: [{ field: 'optionOrder', message: "optionOrder must list every existing option id exactly once." }],
+      });
+    }
+    poll.options.forEach((option) => {
+      option.order = orderIds.indexOf(String(option._id));
+    });
+  }
+
   await poll.save();
+
+  await recordActivities(
+    toPollActivity(
+      poll._id as mongoose.Types.ObjectId,
+      userId ?? null,
+      buildPollUpdateActivity({
+        before,
+        after: poll,
+        // An `options` rewrite mints text; `optionOrder` alone only moves it.
+        reordered: !normalized.options && req.body.optionOrder !== undefined,
+      }),
+    ),
+  );
+
   res.json(serializeAdminPoll(poll));
 }
 
@@ -215,7 +287,8 @@ export async function publishPoll(req: Request, res: Response) {
   if (poll.status !== 'draft' && poll.status !== 'scheduled') {
     return res.status(400).json({ error: 'invalid_state_transition' });
   }
-  const target = req.body.status === 'scheduled' ? 'scheduled' : 'active';
+  const target = req.body.status === 'scheduled' ? 'scheduled' : 'open';
+  const previousStatus = poll.status;
   const now = new Date();
   if (poll.closeDate <= now) return res.status(400).json({ error: 'validation_error', details: [{ field: 'closeDate', message: 'closeDate must be in the future.' }] });
 
@@ -226,13 +299,22 @@ export async function publishPoll(req: Request, res: Response) {
     poll.status = 'scheduled';
     poll.opensAt = opensAt;
   } else {
-    poll.status = 'active';
+    poll.status = 'open';
     poll.opensAt = null;
     poll.publishedBy = userId ?? null;
     poll.publishedAt = now;
   }
   poll.lastEditedBy = userId ?? poll.lastEditedBy;
   await poll.save();
+
+  await recordActivities(
+    toPollActivity(
+      poll._id as mongoose.Types.ObjectId,
+      userId ?? null,
+      diffPollStatus(previousStatus, poll.status),
+    ),
+  );
+
   res.json(serializeAdminPoll(poll));
 }
 
@@ -245,6 +327,15 @@ export async function cancelSchedule(req: Request, res: Response) {
   poll.opensAt = null;
   poll.lastEditedBy = userId ?? poll.lastEditedBy;
   await poll.save();
+
+  await recordActivities(
+    toPollActivity(
+      poll._id as mongoose.Types.ObjectId,
+      userId ?? null,
+      diffPollStatus('scheduled', 'draft'),
+    ),
+  );
+
   res.json(serializeAdminPoll(poll));
 }
 
@@ -252,7 +343,7 @@ export async function closePoll(req: Request, res: Response) {
   const { userId } = getAuth(req);
   const poll = await loadOr404(req, res);
   if (!poll) return;
-  if (poll.status !== 'active') return res.status(400).json({ error: 'invalid_state_transition' });
+  if (poll.status !== 'open') return res.status(400).json({ error: 'invalid_state_transition' });
   const now = new Date();
   poll.status = 'closed';
   poll.featured = false;
@@ -260,11 +351,20 @@ export async function closePoll(req: Request, res: Response) {
   poll.closedAt = now;
   poll.lastEditedBy = userId ?? poll.lastEditedBy;
   await poll.save();
+
+  await recordActivities(
+    toPollActivity(
+      poll._id as mongoose.Types.ObjectId,
+      userId ?? null,
+      diffPollStatus('open', 'closed'),
+    ),
+  );
+
   res.json(serializeAdminPoll(poll));
 }
 
 // PATCH /api/admin/polls/:id/featured — toggle the featured flag.
-// Only active polls can be featured, capped at POLL_FEATURED_MAX.
+// Only open polls can be featured, capped at POLL_FEATURED_MAX.
 export async function setFeatured(req: Request, res: Response) {
   const { userId } = getAuth(req);
   const poll = await loadOr404(req, res);
@@ -272,17 +372,47 @@ export async function setFeatured(req: Request, res: Response) {
 
   const featured = req.body.featured === true;
   if (featured && !poll.featured) {
-    if (poll.status !== 'active') return res.status(400).json({ error: 'not_featurable' });
-    const count = await Poll.countDocuments({ status: 'active', featured: true });
+    if (poll.status !== 'open') return res.status(400).json({ error: 'not_featurable' });
+    const count = await Poll.countDocuments({ status: 'open', featured: true });
     if (count >= POLL_FEATURED_MAX) {
       return res.status(400).json({ error: 'featured_limit_reached', details: { max: POLL_FEATURED_MAX } });
     }
   }
 
+  const featuredChanged = poll.featured !== featured;
   poll.featured = featured;
   poll.lastEditedBy = userId ?? poll.lastEditedBy;
   await poll.save();
+
+  if (featuredChanged) {
+    await recordActivity({
+      entityType: 'poll',
+      entityId: poll._id as mongoose.Types.ObjectId,
+      action: 'featured_changed',
+      actorId: userId ?? null,
+      metadata: { value: featured },
+    });
+  }
+
   res.json(serializeAdminPoll(poll));
+}
+
+/**
+ * GET /api/admin/polls/:id/activity
+ *
+ * Newest-first page of the poll's activity timeline. Moderator-only, like every
+ * other admin poll route.
+ */
+export async function activity(req: Request, res: Response) {
+  const poll = await loadOr404(req, res);
+  if (!poll) return;
+
+  res.json(
+    await listActivity('poll', String(poll._id), {
+      page: Number(req.query.page) || 1,
+      limit: Number(req.query.limit) || ACTIVITY_DEFAULT_LIMIT,
+    }),
+  );
 }
 
 export async function metrics(req: Request, res: Response) {
@@ -313,11 +443,60 @@ export async function metrics(req: Request, res: Response) {
   });
 }
 
+// Why a single poll was left out of a batch. Stable codes, not sentences — the
+// admin panel owns the wording, the same way it owns every other status label.
+export type BulkSkipReason =
+  | 'not_found'
+  | 'already_draft'
+  | 'already_open'
+  | 'already_closed'
+  | 'not_open_yet'
+  | 'close_date_passed'
+  | 'opens_after_close'
+  | 'poll_closed';
+
+interface BulkOutcome {
+  id: string;
+  question: string;
+  ok: boolean;
+  reason?: BulkSkipReason;
+}
+
+// The single reason a poll cannot make this transition, or null when it can.
+// Mirrors the publish / cancel-schedule / close endpoints, which each accept
+// exactly one source status.
+function statusSkipReason(
+  poll: PollDoc,
+  target: 'draft' | 'scheduled' | 'open' | 'closed',
+  opensAt: Date | null,
+  now: Date,
+): BulkSkipReason | null {
+  if (target === 'open' || target === 'scheduled') {
+    if (poll.status === 'closed') return 'already_closed';
+    if (poll.status === 'open') return 'already_open';
+    if (poll.closeDate <= now) return 'close_date_passed';
+    if (target === 'scheduled' && (!opensAt || opensAt >= poll.closeDate)) return 'opens_after_close';
+    return null;
+  }
+  if (target === 'closed') {
+    if (poll.status === 'closed') return 'already_closed';
+    if (poll.status !== 'open') return 'not_open_yet';
+    return null;
+  }
+  // Back to draft — only a scheduled poll can be pulled back.
+  if (poll.status === 'draft') return 'already_draft';
+  if (poll.status === 'open') return 'already_open';
+  if (poll.status === 'closed') return 'already_closed';
+  return null;
+}
+
 // POST /api/admin/polls/bulk — batch status change, category move or delete.
 //
 // A poll's status transitions are state-dependent (only a draft or scheduled poll
-// can open, only an active one can close), so a batch applies to whatever is
-// eligible and reports the rest as skipped rather than failing outright.
+// can open, only an open one can close), so a batch applies to whatever is
+// eligible and reports the rest as skipped rather than failing outright. Every
+// response carries a per-poll `results` list so the caller can say which polls
+// were left alone and why, not just how many.
 export async function bulkPolls(req: Request, res: Response) {
   const { userId } = getAuth(req);
   const { ids, action } = req.body as { ids?: unknown; action?: unknown };
@@ -333,15 +512,34 @@ export async function bulkPolls(req: Request, res: Response) {
   const polls = await Poll.find({ _id: { $in: objectIds } });
   if (polls.length === 0) return res.status(404).json({ error: 'not_found' });
 
+  // An id with no poll behind it was deleted by someone else mid-selection.
+  // It is a skip like any other, so it belongs in the same list.
+  const found = new Set(polls.map((poll) => String(poll._id)));
+  const missing: BulkOutcome[] = objectIds
+    .filter((id) => !found.has(id))
+    .map((id) => ({ id, question: '', ok: false, reason: 'not_found' as const }));
+
+  const respond = (body: Record<string, unknown>, outcomes: BulkOutcome[]) => {
+    const results = [...outcomes, ...missing];
+    return res.json({
+      ...body,
+      affected: results.filter((result) => result.ok).length,
+      skipped: results.filter((result) => !result.ok).length,
+      results,
+    });
+  };
+
   if (action === 'delete') {
-    // Same rule as the single delete: your own poll, or super admin.
-    const deletable = polls.filter((poll) => isSuperAdmin(userId) || poll.createdBy === userId);
-    if (deletable.length) {
-      const pollIds = deletable.map((poll) => poll._id);
-      await PollVote.deleteMany({ pollId: { $in: pollIds } });
-      await Poll.deleteMany({ _id: { $in: pollIds } });
-    }
-    return res.json({ action, affected: deletable.length, skipped: polls.length - deletable.length });
+    // Same rule as the single delete: moderator-or-above, enforced by the router.
+    const pollIds = polls.map((poll) => poll._id);
+    await PollVote.deleteMany({ pollId: { $in: pollIds } });
+    await Poll.deleteMany({ _id: { $in: pollIds } });
+    // The log outlives nothing — a deleted poll takes its timeline with it.
+    await Promise.all(pollIds.map((pollId) => purgeActivity('poll', pollId as mongoose.Types.ObjectId)));
+    return respond(
+      { action },
+      polls.map((poll) => ({ id: String(poll._id), question: poll.question, ok: true })),
+    );
   }
 
   if (action === 'category') {
@@ -361,13 +559,33 @@ export async function bulkPolls(req: Request, res: Response) {
           },
         },
       );
+      await recordActivities(
+        editable
+          .filter((poll) => poll.category !== category.title)
+          .flatMap((poll) =>
+            toPollActivity(poll._id as mongoose.Types.ObjectId, userId ?? null, [
+              {
+                action: 'category_changed',
+                metadata: { from: poll.category || null, to: category.title },
+              },
+            ]),
+          ),
+      );
     }
-    return res.json({ action, affected: editable.length, skipped: polls.length - editable.length });
+    return respond(
+      { action },
+      polls.map((poll) => ({
+        id: String(poll._id),
+        question: poll.question,
+        ok: poll.status !== 'closed',
+        ...(poll.status === 'closed' ? { reason: 'poll_closed' as const } : {}),
+      })),
+    );
   }
 
   if (action === 'status') {
     const status = req.body.status;
-    if (status !== 'draft' && status !== 'scheduled' && status !== 'active' && status !== 'closed') {
+    if (status !== 'draft' && status !== 'scheduled' && status !== 'open' && status !== 'closed') {
       return res.status(400).json({
         error: 'validation_error',
         details: [{ field: 'status', message: 'Invalid status.' }],
@@ -386,54 +604,61 @@ export async function bulkPolls(req: Request, res: Response) {
       }
     }
 
-    let affected = 0;
+    const outcomes: BulkOutcome[] = [];
+    const events: ReturnType<typeof toPollActivity> = [];
     for (const poll of polls) {
-      // Each target status has exactly one legal source, mirroring the
-      // publish / cancel-schedule / close endpoints.
-      if (status === 'active') {
-        if (poll.status !== 'draft' && poll.status !== 'scheduled') continue;
-        if (poll.closeDate <= now) continue;
-        poll.status = 'active';
+      const previousStatus = poll.status;
+      const reason = statusSkipReason(poll, status, opensAt, now);
+      if (reason) {
+        outcomes.push({ id: String(poll._id), question: poll.question, ok: false, reason });
+        continue;
+      }
+
+      if (status === 'open') {
+        poll.status = 'open';
         poll.opensAt = null;
         poll.publishedBy = userId ?? null;
         poll.publishedAt = now;
       } else if (status === 'scheduled') {
-        if (poll.status !== 'draft' && poll.status !== 'scheduled') continue;
-        if (poll.closeDate <= now || !opensAt || opensAt >= poll.closeDate) continue;
         poll.status = 'scheduled';
         poll.opensAt = opensAt;
       } else if (status === 'closed') {
-        if (poll.status !== 'active') continue;
         poll.status = 'closed';
         poll.featured = false;
         poll.closedBy = userId ?? null;
         poll.closedAt = now;
       } else {
-        // Back to draft — only a scheduled poll can be pulled back.
-        if (poll.status !== 'scheduled') continue;
         poll.status = 'draft';
         poll.opensAt = null;
       }
 
       poll.lastEditedBy = userId ?? poll.lastEditedBy;
       await poll.save();
-      affected += 1;
+      events.push(
+        ...toPollActivity(
+          poll._id as mongoose.Types.ObjectId,
+          userId ?? null,
+          diffPollStatus(previousStatus, poll.status),
+        ),
+      );
+      outcomes.push({ id: String(poll._id), question: poll.question, ok: true });
     }
 
-    return res.json({ action, status, affected, skipped: polls.length - affected });
+    await recordActivities(events);
+
+    return respond({ action, status }, outcomes);
   }
 
   return res.status(400).json({ error: 'invalid_action' });
 }
 
+// DELETE /api/admin/polls/:id — moderator-or-above delete + cascade. No ownership rule:
+// any moderator can delete any poll, matching research requests.
 export async function deletePoll(req: Request, res: Response) {
-  const { userId } = getAuth(req);
   const poll = await loadOr404(req, res);
   if (!poll) return;
-  if (!isSuperAdmin(userId) && poll.createdBy !== userId) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
   await PollVote.deleteMany({ pollId: poll._id });
   await poll.deleteOne();
+  await purgeActivity('poll', poll._id as mongoose.Types.ObjectId);
   res.status(204).send();
 }

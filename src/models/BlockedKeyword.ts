@@ -25,6 +25,11 @@ export interface BlockedKeywordDoc extends Document {
   reason: string | null;
   // Convenience flag: removedAt === null.
   isActive: boolean;
+  // How many comments this term has held, and when it last did. Incremented by
+  // the matcher, so the admin table can show which terms actually earn their
+  // place on the list and which have never fired.
+  hitCount: number;
+  lastHitAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -42,6 +47,10 @@ const BlockedKeywordSchema = new Schema<BlockedKeywordDoc>(
     removedBy: { type: String, default: null },
     reason: { type: String, default: null, maxlength: 500 },
     isActive: { type: Boolean, required: true, default: true },
+    // Rows written before these existed read as the defaults, so no backfill
+    // migration is needed.
+    hitCount: { type: Number, required: true, default: 0, min: 0 },
+    lastHitAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
@@ -50,6 +59,9 @@ const BlockedKeywordSchema = new Schema<BlockedKeywordDoc>(
 BlockedKeywordSchema.index({ isActive: 1, language: 1 });
 // Lookup / duplicate detection.
 BlockedKeywordSchema.index({ term: 1, isActive: 1 });
+// The admin table sorts on both hit columns.
+BlockedKeywordSchema.index({ hitCount: -1 });
+BlockedKeywordSchema.index({ lastHitAt: -1 });
 
 const BlockedKeyword: Model<BlockedKeywordDoc> =
   mongoose.models.BlockedKeyword ||

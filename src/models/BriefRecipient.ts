@@ -23,6 +23,11 @@ export interface BriefRecipientDoc extends Document {
   emailFailedAt: Date | null;
   emailRetryCount: number;
   emailLastError: string | null;
+  // First time the recipient opened this edition on the web (POST /:id/read).
+  // Write-once — a re-read does not move it — so it reads as "when they first
+  // got to it". Null for editions delivered but never opened, and for every
+  // edition that predates read tracking.
+  readAt: Date | null;
   deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -52,6 +57,7 @@ const BriefRecipientSchema = new Schema<BriefRecipientDoc>(
     emailFailedAt: { type: Date, default: null },
     emailRetryCount: { type: Number, default: 0 },
     emailLastError: { type: String, default: null },
+    readAt: { type: Date, default: null },
     deletedAt: { type: Date, default: null },
   },
   { timestamps: true },
@@ -60,6 +66,8 @@ const BriefRecipientSchema = new Schema<BriefRecipientDoc>(
 BriefRecipientSchema.index({ clerkUserId: 1, briefDate: 1 }, { unique: true });
 BriefRecipientSchema.index({ clerkUserId: 1, briefDate: -1, deletedAt: 1 });
 BriefRecipientSchema.index({ emailStatus: 1, emailEnabled: 1, briefDate: -1 });
+// Account overview: "briefs read this month" for one user.
+BriefRecipientSchema.index({ clerkUserId: 1, readAt: -1 });
 
 const BriefRecipient: Model<BriefRecipientDoc> =
   mongoose.models.BriefRecipient ||

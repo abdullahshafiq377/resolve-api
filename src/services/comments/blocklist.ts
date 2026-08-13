@@ -87,6 +87,9 @@ export interface CompiledTerm {
   pattern: RegExp;
   // Minimum number of real (non-censor) characters the match must contain.
   minRealChars: number;
+  // Set only when the term came from the database, so a hit can be attributed
+  // back to its row. Terms compiled directly in tests leave it undefined.
+  id?: string;
 }
 
 export function compileTerm(rawTerm: string, mode: BlockedKeywordMatchMode = 'word'): CompiledTerm | null {
@@ -147,7 +150,10 @@ async function getActiveTerms(): Promise<CompiledTerm[]> {
   const docs = await BlockedKeyword.find({ isActive: true }).select('term matchMode').lean();
   // Compiled once per cache fill, never per request.
   const terms = docs
-    .map((d) => compileTerm(d.term, (d.matchMode as BlockedKeywordMatchMode) ?? 'word'))
+    .map<CompiledTerm | null>((d) => {
+      const compiled = compileTerm(d.term, (d.matchMode as BlockedKeywordMatchMode) ?? 'word');
+      return compiled ? { ...compiled, id: String(d._id) } : null;
+    })
     .filter((t): t is CompiledTerm => t !== null);
   cache = { terms, at: Date.now() };
   return terms;
@@ -158,11 +164,31 @@ export function invalidateBlockListCache(): void {
   cache = null;
 }
 
+// Bump the usage counters for the terms a comment tripped. Fire-and-forget: the
+// moderation decision has already been made, and a failed counter write must not
+// fail the comment. Errors are swallowed rather than left unhandled.
+function recordHits(ids: string[]): void {
+  if (!ids.length) return;
+  void BlockedKeyword.updateMany(
+    { _id: { $in: ids } },
+    { $inc: { hitCount: 1 }, $set: { lastHitAt: new Date() } },
+  ).catch(() => {
+    /* counters are reporting only — never block moderation on them */
+  });
+}
+
 // Returns true if the comment should be held. The matched term is deliberately
-// not returned — callers must not be able to leak it to the author.
+// not returned — callers must not be able to leak it to the author. Matches are
+// still counted internally, which stays inside this module.
 export async function isBlocked(bodyText: string): Promise<boolean> {
   const terms = await getActiveTerms();
   if (!terms.length) return false;
   const haystack = normalizeForMatch(bodyText);
-  return terms.some((compiled) => matchesTerm(haystack, compiled));
+  // Every matching term is collected rather than stopping at the first, so the
+  // counters credit each term that would have held the comment on its own. A
+  // clean comment costs the same full scan either way.
+  const hits = terms.filter((compiled) => matchesTerm(haystack, compiled));
+  if (!hits.length) return false;
+  recordHits(hits.map((hit) => hit.id).filter((id): id is string => Boolean(id)));
+  return true;
 }

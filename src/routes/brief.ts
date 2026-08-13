@@ -6,6 +6,7 @@ import {
   getGeneric,
   getPreferences,
   latest,
+  markRead,
   putPreferences,
 } from '../controllers/brief';
 import { requirePremium, requireSignedIn, requireStandard } from '../middleware/auth';
@@ -25,6 +26,10 @@ router.get('/latest', requireStandard, wrap(latest));
 // Archive + single past edition are Premium-only (doc §5). Standard gets the
 // daily personalised brief but not the back catalogue.
 router.get('/archive', requirePremium, wrap(archive));
+// Read receipt for any edition the member owns. Standard+, matching who can
+// open a brief at all — the archive's Premium gate does not apply, since today's
+// edition is Standard-readable.
+router.post('/:id/read', requireStandard, wrap(markRead));
 router.get('/:id', requirePremium, wrap(getById));
 
 export default router;

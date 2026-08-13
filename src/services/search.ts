@@ -79,7 +79,7 @@ async function searchShorts(rx: RegExp, limit: number): Promise<SearchResult[]> 
 
 async function searchCategories(rx: RegExp, limit: number): Promise<SearchResult[]> {
   const docs = await Category.find({ active: true, title: rx })
-    .sort({ order: 1 })
+    .sort({ title: 1 })
     .limit(limit)
     .select('title slug')
     .lean();
@@ -107,9 +107,9 @@ async function searchResearchRequests(rx: RegExp, limit: number): Promise<Search
 }
 
 async function searchPolls(rx: RegExp, limit: number): Promise<SearchResult[]> {
-  // Public polls are the active + closed ones (drafts/scheduled are hidden).
+  // Public polls are the open + closed ones (drafts/scheduled are hidden).
   const docs = await Poll.find({
-    status: { $in: ['active', 'closed'] },
+    status: { $in: ['open', 'closed'] },
     $or: [{ question: rx }, { description: rx }],
   })
     .sort({ status: 1, createdAt: -1 })

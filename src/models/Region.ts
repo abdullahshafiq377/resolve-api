@@ -19,7 +19,11 @@ const RegionSchema = new Schema<RegionDoc>(
   { timestamps: true },
 );
 
-RegionSchema.index({ active: 1, order: 1, title: 1 });
+// Manual ordering was dropped from the admin screens; every list now reads
+// alphabetically (with Global pinned in code — see sortRegionsForDisplay). The
+// `order` field is left on the schema so existing documents stay valid, but
+// nothing reads it any more.
+RegionSchema.index({ active: 1, title: 1 });
 
 const Region: Model<RegionDoc> =
   mongoose.models.Region || mongoose.model<RegionDoc>('Region', RegionSchema);

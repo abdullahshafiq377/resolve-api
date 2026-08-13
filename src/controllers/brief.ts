@@ -23,7 +23,7 @@ type ArchiveSort = 'newest' | 'oldest';
 // Enrich each brief story with display fields pulled from its source Article
 // (image / category / read-time / publish date). One batched query - stories
 // whose article is missing or unpublished simply get null visuals.
-async function enrichStories(stories: SegmentStories) {
+export async function enrichStories(stories: SegmentStories) {
   const ids = stories.map((story) => story.articleId).filter(Boolean);
   const articles = ids.length
     ? await Article.find({ _id: { $in: ids } }).select('featuredImage category publishDate readTimeMinutes')
@@ -221,6 +221,33 @@ export async function getGeneric(req: Request, res: Response) {
   }).sort({ briefDate: -1, createdAt: -1 });
   if (!segment) return res.json({ state: 'not_ready', brief: null });
   res.json({ state: 'ready', brief: await serializeGenericBrief(segment) });
+}
+
+/**
+ * POST /api/brief/:id/read — stamp the first time the member opened this
+ * edition. Idempotent: the `readAt: null` filter means a re-read is a no-op, so
+ * the client can fire it on every load without inflating anything. Feeds the
+ * "briefs read" tile on the account overview.
+ */
+export async function markRead(req: Request, res: Response) {
+  const clerkUserId = userIdOrThrow(req);
+  const recipient = await BriefRecipient.findOneAndUpdate(
+    { _id: req.params.id, clerkUserId, deletedAt: null, readAt: null },
+    { $set: { readAt: new Date() } },
+    { new: true },
+  );
+  // No match means either "already read" or "not this user's edition" — the
+  // latter is a 404 so a wrong id is not silently swallowed.
+  if (!recipient) {
+    const existing = await BriefRecipient.findOne({
+      _id: req.params.id,
+      clerkUserId,
+      deletedAt: null,
+    }).select('readAt');
+    if (!existing) return res.status(404).json({ error: 'not_found' });
+    return res.json({ readAt: existing.readAt, alreadyRead: true });
+  }
+  res.json({ readAt: recipient.readAt, alreadyRead: false });
 }
 
 export async function getById(req: Request, res: Response) {

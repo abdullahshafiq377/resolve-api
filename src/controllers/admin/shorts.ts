@@ -1,9 +1,12 @@
 import type { Request, Response } from 'express';
+import { getAuth } from '@clerk/express';
 import Short, { ShortDoc } from '../../models/Short';
+import { findAssetMeta, recordUploadedAsset } from '../../models/UploadedAsset';
 import Category, { CategoryDoc } from '../../models/Category';
 import { generateUniqueSlug } from '../../utils/slugify';
 import { createUploadUrl } from '../../config/s3';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../../services/categories';
+import { parseOrder, parseSortKey, searchRegex, stableSort } from '../../utils/query';
 
 const MAX_LIMIT = 100;
 
@@ -49,10 +52,35 @@ export async function uploadUrl(req: Request, res: Response) {
   }
 
   const result = await createUploadUrl({ filename, contentType, fileSize, type });
+
+  // The key is a UUID, so this is the only moment the real name and size are
+  // known. Recorded here and read back when the media is attached.
+  await recordUploadedAsset({
+    fileKey: result.fileKey,
+    originalName: filename,
+    size: fileSize,
+    contentType,
+    surface: 'short',
+    kind: type ?? 'video',
+    uploadedBy: getAuth(req).userId ?? undefined,
+  });
+
   res.json(result);
 }
 
 // GET /api/admin/shorts
+// Columns the admin shorts table can be ordered by.
+const SHORT_SORT_KEYS = ['title', 'views', 'createdAt', 'publishedAt'] as const;
+const SHORT_SORT_FIELDS: Record<(typeof SHORT_SORT_KEYS)[number], string> = {
+  title: 'title',
+  views: 'views',
+  createdAt: 'createdAt',
+  publishedAt: 'publishedAt',
+};
+
+// Case- and accent-insensitive ordering for the text columns.
+const LIST_COLLATION = { locale: 'en', strength: 2 } as const;
+
 export async function list(req: Request, res: Response) {
   const { status, categoryId, categorySlug } = req.query as Record<string, string | undefined>;
   const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
@@ -70,10 +98,21 @@ export async function list(req: Request, res: Response) {
     filter.categoryId = category._id;
   }
 
+  // Search and sort run over the whole collection, not the page in hand.
+  const term = searchRegex(req.query.search);
+  if (term) filter.$or = [{ title: term }, { description: term }];
+
+  const sortKey = parseSortKey(req.query.sort, SHORT_SORT_KEYS, 'createdAt');
+  const order = parseOrder(req.query.order, sortKey === 'title' ? 1 : -1);
+
   const skip = (page - 1) * limit;
 
   const [shorts, total] = await Promise.all([
-    Short.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Short.find(filter)
+      .collation(LIST_COLLATION)
+      .sort(stableSort(SHORT_SORT_FIELDS[sortKey], order))
+      .skip(skip)
+      .limit(limit),
     Short.countDocuments(filter),
   ]);
 
@@ -100,10 +139,19 @@ export async function create(req: Request, res: Response) {
 
   const slug = await generateUniqueSlug(title, Short);
 
+  // Name and size come from the upload record, never from the request body, so
+  // the label cannot disagree with what was actually uploaded.
+  const videoMeta = videoKey ? await findAssetMeta(videoKey) : null;
+  const thumbnailMeta = thumbnailKey ? await findAssetMeta(thumbnailKey) : null;
+
   const doc: Record<string, unknown> = {
     title, slug, description,
     videoUrl, videoKey,
     thumbnailUrl, thumbnailKey,
+    videoName: videoMeta?.originalName,
+    videoSize: videoMeta?.size,
+    thumbnailName: thumbnailMeta?.originalName,
+    thumbnailSize: thumbnailMeta?.size,
     durationSeconds, categoryId: categoryDoc._id, category: categoryDoc.title, tags,
     featured, status,
   };
@@ -136,15 +184,41 @@ export async function update(req: Request, res: Response) {
   if (!current) return res.status(404).json({ error: 'Short not found' });
 
   const patch: Record<string, unknown> = {};
+  const unset: Record<string, 1> = {};
   if (title !== undefined) {
     patch.title = title;
     patch.slug = await generateUniqueSlug(title, Short, req.params.id);
   }
   if (description !== undefined) patch.description = description;
   if (videoUrl !== undefined) patch.videoUrl = videoUrl;
-  if (videoKey !== undefined) patch.videoKey = videoKey;
+  // Name and size track their key and come from the upload record. An upload
+  // predating that collection resolves to null, so the stale label is cleared
+  // rather than left describing the previous file.
+  if (videoKey !== undefined) {
+    patch.videoKey = videoKey;
+    const meta = await findAssetMeta(videoKey);
+    if (meta) {
+      patch.videoName = meta.originalName;
+      patch.videoSize = meta.size;
+    } else {
+      // `$set: undefined` is dropped by Mongoose, so an unknown upload has to
+      // unset explicitly or the previous file's label would survive.
+      unset.videoName = 1;
+      unset.videoSize = 1;
+    }
+  }
   if (thumbnailUrl !== undefined) patch.thumbnailUrl = thumbnailUrl;
-  if (thumbnailKey !== undefined) patch.thumbnailKey = thumbnailKey;
+  if (thumbnailKey !== undefined) {
+    patch.thumbnailKey = thumbnailKey;
+    const meta = await findAssetMeta(thumbnailKey);
+    if (meta) {
+      patch.thumbnailName = meta.originalName;
+      patch.thumbnailSize = meta.size;
+    } else {
+      unset.thumbnailName = 1;
+      unset.thumbnailSize = 1;
+    }
+  }
   if (durationSeconds !== undefined) patch.durationSeconds = durationSeconds;
   if (categoryId !== undefined) {
     const categoryDoc = await findCategoryByIdOrThrow(categoryId);
@@ -160,10 +234,14 @@ export async function update(req: Request, res: Response) {
     }
   }
 
-  const short = await Short.findByIdAndUpdate(req.params.id, patch, {
-    new: true,
-    runValidators: true,
-  });
+  const short = await Short.findByIdAndUpdate(
+    req.params.id,
+    {
+      ...(Object.keys(patch).length > 0 ? { $set: patch } : {}),
+      ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}),
+    },
+    { new: true, runValidators: true },
+  );
 
   res.json(await serializeShort(short));
 }

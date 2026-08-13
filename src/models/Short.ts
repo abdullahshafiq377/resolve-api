@@ -9,6 +9,13 @@ export interface ShortDoc extends Document {
   videoKey: string;
   thumbnailUrl?: string;
   thumbnailKey?: string;
+  // Denormalised from UploadedAsset when the media is attached — object keys are
+  // UUIDs, so this is the only way to name the file in the admin editor. Absent
+  // on anything uploaded before that collection existed.
+  videoName?: string;
+  videoSize?: number;
+  thumbnailName?: string;
+  thumbnailSize?: number;
   durationSeconds?: number;
   category?: string;
   categoryId: mongoose.Types.ObjectId;
@@ -32,6 +39,10 @@ const ShortSchema = new Schema<ShortDoc>(
 
     thumbnailUrl: { type: String, trim: true },
     thumbnailKey: { type: String, trim: true },
+    videoName: { type: String, trim: true },
+    videoSize: { type: Number },
+    thumbnailName: { type: String, trim: true },
+    thumbnailSize: { type: Number },
 
     durationSeconds: { type: Number, min: 0 },
 

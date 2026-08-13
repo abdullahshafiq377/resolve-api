@@ -20,6 +20,8 @@
     "migrate:regions": "tsx src/scripts/migrateRegions.ts",
     "migrate:ai-summary": "tsx src/scripts/migrateAiSummary.ts",
     "migrate:chat-message-model": "tsx src/scripts/migrateChatMessageModel.ts",
+    "migrate:poll-open-status": "tsx src/scripts/migratePollOpenStatus.ts",
+    "migrate:unset-poll-results-mode": "tsx src/scripts/unsetPollResultsMode.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",
     "create:vector-index": "tsx src/scripts/createVectorIndex.ts",

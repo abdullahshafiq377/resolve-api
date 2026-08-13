@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import { getAuth } from '@clerk/express';
 import type { Request, Response } from 'express';
 import Article from '../models/Article';
@@ -6,6 +7,7 @@ import { httpError } from '../utils/errors';
 import { generateAiSummary } from '../services/aiSummaryGeneration';
 import { assertAiSummaryRateLimit } from '../services/aiSummaryRateLimit';
 import { normalizeAiSummaryContent, normalizeAiSummaryFormat } from '../services/aiSummaryValidation';
+import { recordActivity } from '../services/activity';
 
 function moderatorId(req: Request): string {
   return getAuth(req).userId || 'admin';
@@ -48,6 +50,7 @@ export async function generateSummary(req: Request, res: Response) {
   assertAiSummaryRateLimit(userId);
   const format = normalizeAiSummaryFormat(req.body?.format);
   const article = await assertArticleExists(req.params.id);
+  const existing = await ArticleSummary.exists({ articleId: article._id });
   const generated = await generateAiSummary(article, format);
   const now = new Date();
 
@@ -71,6 +74,16 @@ export async function generateSummary(req: Request, res: Response) {
     { new: true, upsert: true, runValidators: true },
   );
 
+  // `existing` distinguishes the first draft from a regeneration, which the
+  // timeline words differently.
+  await recordActivity({
+    entityType: 'article',
+    entityId: article._id as mongoose.Types.ObjectId,
+    action: existing ? 'ai_summary_regenerated' : 'ai_summary_generated',
+    actorId: userId,
+    metadata: { format, model: generated.model },
+  });
+
   res.json({ data: serialize(summary) });
 }
 
@@ -91,6 +104,14 @@ export async function updateSummary(req: Request, res: Response) {
   summary.lastEditedAt = new Date();
   await summary.save();
 
+  await recordActivity({
+    entityType: 'article',
+    entityId: summary.articleId,
+    action: 'ai_summary_edited',
+    actorId: userId,
+    metadata: { format },
+  });
+
   res.json({ data: serialize(summary) });
 }
 
@@ -105,6 +126,14 @@ export async function approveSummary(req: Request, res: Response) {
   summary.approvedBy = userId;
   summary.approvedAt = new Date();
   await summary.save();
+
+  await recordActivity({
+    entityType: 'article',
+    entityId: summary.articleId,
+    action: 'ai_summary_approved',
+    actorId: userId,
+    metadata: { format: summary.format },
+  });
 
   res.json({ data: serialize(summary) });
 }

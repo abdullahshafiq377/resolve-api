@@ -29,8 +29,18 @@ export async function findCategoryByIdOrThrow(value: unknown): Promise<CategoryD
   return category;
 }
 
+/**
+ * Resolve a category by its current slug, falling back to its retired ones.
+ *
+ * A rename moves the slug, so every published link, share and search result
+ * pointing at the old address would otherwise stop resolving. The live slug is
+ * tried first: if a category has since taken a slug another one used to hold,
+ * the category that owns it now wins.
+ */
 export async function findCategoryBySlug(slug: string): Promise<CategoryDoc | null> {
-  return Category.findOne({ slug });
+  const current = await Category.findOne({ slug });
+  if (current) return current;
+  return Category.findOne({ previousSlugs: slug });
 }
 
 export interface CategoryUsage {
@@ -58,6 +68,36 @@ export async function getCategoryUsage(categoryId: string): Promise<CategoryUsag
 // True when a category is referenced by any article, short, approved research request, or poll.
 export function isCategoryInUse(usage: CategoryUsage): boolean {
   return usage.articleCount + usage.shortCount + usage.researchRequestCount + usage.pollCount > 0;
+}
+
+/**
+ * Move everything filed under `fromId` to `toId`.
+ *
+ * A category in use cannot be deactivated or deleted, and the way out of that is
+ * to give its content somewhere else to live first. Every reference is a single
+ * `categoryId`, so each collection is one `updateMany` — after this runs the
+ * source category's usage is zero and the caller is free to act on it.
+ *
+ * Research requests move wholesale, including the pending and rejected ones that
+ * `getCategoryUsage` does not count: leaving them pointed at a deleted category
+ * would break them the moment they were approved.
+ */
+export async function reassignCategoryContent(
+  fromId: string,
+  toId: string,
+): Promise<CategoryUsage> {
+  const [articles, shorts, researchRequests, polls] = await Promise.all([
+    Article.updateMany({ categoryId: fromId }, { $set: { categoryId: toId } }),
+    Short.updateMany({ categoryId: fromId }, { $set: { categoryId: toId } }),
+    ResearchRequest.updateMany({ categoryId: fromId }, { $set: { categoryId: toId } }),
+    Poll.updateMany({ categoryId: fromId }, { $set: { categoryId: toId } }),
+  ]);
+  return {
+    articleCount: articles.modifiedCount,
+    shortCount: shorts.modifiedCount,
+    researchRequestCount: researchRequests.modifiedCount,
+    pollCount: polls.modifiedCount,
+  };
 }
 
 export async function ensureDefaultCategories(): Promise<Map<string, CategoryDoc>> {

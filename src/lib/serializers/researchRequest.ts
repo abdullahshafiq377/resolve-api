@@ -172,15 +172,27 @@ export function serializeAdminRequest(request: ResearchRequestDoc, ctx: AdminCon
       clerkUserId: request.submitterId,
       displayName: submitter?.displayName ?? ANONYMOUS_DISPLAY_NAME,
       email: submitter?.email ?? null,
+      avatarUrl: submitter?.imageUrl ?? null,
     },
     category: categoryId ? serializeCategoryRef(ctx.categoryMap.get(categoryId)) : null,
     status: request.status,
     approvedAt: request.approvedAt?.toISOString() ?? null,
     rejectionReason: request.rejectionReason,
     notPursuedReason: request.notPursuedReason,
+    // Internal. Admin payloads only — `serializePublicRequest` deliberately
+    // omits it, and both serializers list fields explicitly so it cannot leak
+    // by accident.
+    editorNote: request.editorNote
+      ? {
+          body: request.editorNote.body,
+          authorName: request.editorNote.authorName ?? null,
+          at: request.editorNote.at?.toISOString() ?? null,
+        }
+      : null,
     linkedArticleId: request.linkedArticleId ? String(request.linkedArticleId) : null,
     linkedArticleSlug: request.linkedArticleSlug,
     voteCount: request.voteCount,
+    commentCount: request.commentCount,
     submittedAt: request.submittedAt?.toISOString() ?? request.createdAt.toISOString(),
     moderatedBy: request.moderatedBy,
     moderatedAt: request.moderatedAt?.toISOString() ?? null,
@@ -197,12 +209,26 @@ export function serializeAdminRequest(request: ResearchRequestDoc, ctx: AdminCon
 
 // Synthesize a coarse audit trail from the latest-actor audit fields (not a full
 // event log — that is an explicit follow-up).
-export function buildAuditTrail(request: ResearchRequestDoc) {
-  const trail: { action: string; by: string | null; at: string }[] = [];
+export function buildAuditTrail(
+  request: ResearchRequestDoc,
+  /**
+   * Clerk id → user, for naming the actor. A raw `user_3EcL…` is unreadable in
+   * the admin activity timeline, so `byName` carries display name, then email.
+   * Optional: callers without the map still get the ids.
+   */
+  userMap?: Map<string, { displayName?: string | null; email?: string | null }>,
+) {
+  const trail: { action: string; by: string | null; byName: string | null; at: string }[] = [];
+  const nameFor = (id: string | null): string | null => {
+    if (!id) return null;
+    const user = userMap?.get(id);
+    return user?.displayName || user?.email || null;
+  };
   if (request.submittedBy) {
     trail.push({
       action: 'submitted',
       by: request.submittedBy,
+      byName: nameFor(request.submittedBy),
       at: (request.submittedAt ?? request.createdAt).toISOString(),
     });
   }
@@ -210,6 +236,7 @@ export function buildAuditTrail(request: ResearchRequestDoc) {
     trail.push({
       action: request.status === 'rejected' ? 'rejected' : 'approved',
       by: request.moderatedBy,
+      byName: nameFor(request.moderatedBy),
       at: request.moderatedAt.toISOString(),
     });
   }
@@ -217,6 +244,7 @@ export function buildAuditTrail(request: ResearchRequestDoc) {
     trail.push({
       action: 'status_changed',
       by: request.statusChangedBy,
+      byName: nameFor(request.statusChangedBy),
       at: request.statusChangedAt.toISOString(),
     });
   }
@@ -224,6 +252,7 @@ export function buildAuditTrail(request: ResearchRequestDoc) {
     trail.push({
       action: 'linked_article',
       by: request.linkedArticleBy,
+      byName: nameFor(request.linkedArticleBy),
       at: request.linkedArticleAt.toISOString(),
     });
   }
@@ -231,6 +260,7 @@ export function buildAuditTrail(request: ResearchRequestDoc) {
     trail.push({
       action: 'not_pursued_reason_set',
       by: request.notPursuedReasonSetBy,
+      byName: nameFor(request.notPursuedReasonSetBy),
       at: request.notPursuedReasonSetAt.toISOString(),
     });
   }

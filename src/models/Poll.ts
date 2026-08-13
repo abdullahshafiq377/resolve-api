@@ -1,10 +1,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 
-export const POLL_STATUSES = ['draft', 'scheduled', 'active', 'closed'] as const;
+export const POLL_STATUSES = ['draft', 'scheduled', 'open', 'closed'] as const;
 export type PollStatus = (typeof POLL_STATUSES)[number];
-
-export const POLL_RESULTS_MODES = ['hidden_until_vote', 'always_visible'] as const;
-export type PollResultsMode = (typeof POLL_RESULTS_MODES)[number];
 
 export const POLL_OPTION_MIN = 2;
 export const POLL_OPTION_MAX = 6;
@@ -30,7 +27,6 @@ export interface PollDoc extends Document {
   status: PollStatus;
   closeDate: Date;
   opensAt: Date | null;
-  resultsMode: PollResultsMode;
   totalVotes: number;
   optionVoteCounts: Map<string, number>;
   commentCount: number;
@@ -94,12 +90,6 @@ const PollSchema = new Schema<PollDoc>(
     status: { type: String, enum: POLL_STATUSES, required: true, default: 'draft', index: true },
     closeDate: { type: Date, required: true },
     opensAt: { type: Date, default: null },
-    resultsMode: {
-      type: String,
-      enum: POLL_RESULTS_MODES,
-      required: true,
-      default: 'hidden_until_vote',
-    },
     totalVotes: { type: Number, default: 0, min: 0 },
     optionVoteCounts: {
       type: Map,

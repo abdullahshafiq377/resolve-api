@@ -11,6 +11,7 @@ import {
   closePoll,
   setFeatured,
   metrics,
+  activity,
   deletePoll,
   bulkPolls,
 } from '../../controllers/admin/polls';
@@ -29,6 +30,7 @@ router.post('/', wrap(createPoll));
 // Bulk sits above /:id so 'bulk' is never read as an id.
 router.post('/bulk', wrap(bulkPolls));
 router.get('/:id/metrics', wrap(metrics));
+router.get('/:id/activity', wrap(activity));
 router.get('/:id', wrap(getPoll));
 router.patch('/:id', wrap(updatePoll));
 router.post('/:id/publish', wrap(publishPoll));

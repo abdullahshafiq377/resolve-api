@@ -6,9 +6,9 @@ import ResearchRequestVote from '../../models/ResearchRequestVote';
 import Notification from '../../models/Notification';
 import Article from '../../models/Article';
 import Category from '../../models/Category';
-import { isSuperAdmin } from '../../middleware/auth';
 import { httpError } from '../../utils/errors';
-import { findUsersByIds } from '../../services/users';
+import { findActiveUser, findUsersByIds } from '../../services/users';
+import { searchRegex } from '../../utils/query';
 import {
   buildLookupMaps,
   getUpvoterRecipients,
@@ -115,39 +115,60 @@ export async function listQueue(req: Request, res: Response) {
   const tab = typeof req.query.tab === 'string' ? req.query.tab : 'pending';
 
   const filter: Record<string, unknown> = {};
+  // The tab's own status constraint, kept aside so the lifecycle filter below
+  // intersects with it instead of overwriting it.
+  let tabStatus: unknown;
   if (tab === 'pending') filter.approvedAt = null;
   else if (tab === 'approved') {
     filter.approvedAt = { $ne: null };
-    filter.status = { $ne: 'rejected' };
-  } else if (tab === 'rejected') filter.status = 'rejected';
+    tabStatus = { $ne: 'rejected' };
+  } else if (tab === 'rejected') tabStatus = 'rejected';
   // tab === 'all' → no extra filter
 
-  // Lifecycle status filter, independent of the moderation tab. Ignored when the
-  // tab already pins a status ('rejected').
+  // Lifecycle status filter. The tab's constraint is a floor: an explicit
+  // `status` can narrow it, never widen it, so asking the approved tab for
+  // rejected requests matches nothing rather than defeating the guard.
   const status = req.query.status;
-  if (typeof status === 'string' && status && tab !== 'rejected') {
-    filter.status = status;
+  if (typeof status === 'string' && status) {
+    const withinTab =
+      tab === 'approved' ? status !== 'rejected' : tab === 'rejected' ? status === 'rejected' : true;
+    filter.status = withinTab ? status : { $in: [] };
+  } else if (tabStatus !== undefined) {
+    filter.status = tabStatus;
   }
 
   const categoryId = req.query.categoryId;
   if (typeof categoryId === 'string' && categoryId && mongoose.Types.ObjectId.isValid(categoryId)) {
     filter.categoryId = new mongoose.Types.ObjectId(categoryId);
   }
-  const search = req.query.search;
-  if (typeof search === 'string' && search.trim()) {
-    filter.title = { $regex: search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
-  }
+  // Search covers the description too — the table shows a title, but a
+  // moderator looking for a request often remembers a phrase from its body.
+  const term = searchRegex(req.query.search);
+  if (term) filter.$or = [{ title: term }, { description: term }];
 
+  // `title_asc` / `title_desc` join the existing keys so the table's title
+  // column orders the whole collection rather than the page in hand.
   const sortKey = typeof req.query.sort === 'string' ? req.query.sort : 'newest';
   const sort: Record<string, 1 | -1> =
     sortKey === 'oldest'
-      ? { createdAt: 1 }
+      ? { createdAt: 1, _id: 1 }
       : sortKey === 'most_voted'
-        ? { voteCount: -1, createdAt: -1 }
-        : { createdAt: -1 };
+        ? { voteCount: -1, createdAt: -1, _id: -1 }
+        : sortKey === 'least_voted'
+          ? { voteCount: 1, createdAt: -1, _id: -1 }
+          : sortKey === 'title_asc'
+            ? { title: 1, _id: 1 }
+            : sortKey === 'title_desc'
+              ? { title: -1, _id: -1 }
+              : { createdAt: -1, _id: -1 };
 
   const [requests, total] = await Promise.all([
-    ResearchRequest.find(filter).sort(sort).skip(skip).limit(limit),
+    // Case- and accent-insensitive, so "Zeb" does not sort before "apple".
+    ResearchRequest.find(filter)
+      .collation({ locale: 'en', strength: 2 })
+      .sort(sort)
+      .skip(skip)
+      .limit(limit),
     ResearchRequest.countDocuments(filter),
   ]);
 
@@ -169,6 +190,18 @@ export async function getDetail(req: Request, res: Response) {
   const voterUsers = await findUsersByIds(votes.map((v) => v.userId));
   const voterById = new Map(voterUsers.map((u) => [u.clerkUserId, u]));
 
+  // The audit fields hold Clerk ids; resolve them so the admin timeline can name
+  // who acted rather than printing `user_3EcL…`.
+  const actorIds = [
+    request.submittedBy,
+    request.moderatedBy,
+    request.statusChangedBy,
+    request.linkedArticleBy,
+    request.notPursuedReasonSetBy,
+  ].filter((id): id is string => Boolean(id));
+  const actors = await findUsersByIds([...new Set(actorIds)]);
+  const actorMap = new Map(actors.map((u) => [u.clerkUserId, u]));
+
   const upvoters = votes.map((vote) => {
     const u = voterById.get(vote.userId);
     return {
@@ -182,7 +215,7 @@ export async function getDetail(req: Request, res: Response) {
   res.json({
     ...serializeAdminRequest(request, { userMap, categoryMap }),
     upvoters,
-    auditTrail: buildAuditTrail(request),
+    auditTrail: buildAuditTrail(request, actorMap),
   });
 }
 
@@ -191,10 +224,11 @@ export async function editRequest(req: Request, res: Response) {
   const request = await loadOr404(req, res);
   if (!request) return;
 
-  const { title, description, categoryId } = req.body as {
+  const { title, description, categoryId, editorNote } = req.body as {
     title?: unknown;
     description?: unknown;
     categoryId?: unknown;
+    editorNote?: unknown;
   };
   const details: { field: string; message: string }[] = [];
 
@@ -209,6 +243,34 @@ export async function editRequest(req: Request, res: Response) {
     if (d.length < 20 || d.length > 500) {
       details.push({ field: 'description', message: 'Description must be 20–500 characters.' });
     } else request.description = d;
+  }
+  // Internal note. Optional, so an empty string clears it rather than failing.
+  if (editorNote !== undefined) {
+    if (editorNote === null) {
+      request.editorNote = null;
+    } else if (typeof editorNote !== 'string') {
+      details.push({ field: 'editorNote', message: "Editor's note must be text." });
+    } else {
+      const note = editorNote.trim();
+      if (note.length > 500) {
+        details.push({ field: 'editorNote', message: "Editor's note must be 500 characters or fewer." });
+      } else if (!note) {
+        request.editorNote = null;
+      } else if (note !== request.editorNote?.body) {
+        // Byline resolved server-side from the acting moderator — never taken
+        // from the request body, so a note cannot be misattributed. Only
+        // restamped when the text actually changed, so editing the title does
+        // not reattribute an existing note.
+        const { userId } = getAuth(req);
+        const author = userId ? await findActiveUser(userId) : null;
+        request.editorNote = {
+          body: note,
+          authorName: author ? author.displayName || author.email || null : null,
+          authorId: userId ?? null,
+          at: new Date(),
+        };
+      }
+    }
   }
   if (details.length) return res.status(400).json({ error: 'validation_error', details });
 
@@ -458,11 +520,8 @@ export async function listUpvoters(req: Request, res: Response) {
   });
 }
 
-// DELETE /api/admin/research-requests/:id — super-admin hard delete + cascade.
+// DELETE /api/admin/research-requests/:id — moderator-or-above hard delete + cascade.
 export async function hardDelete(req: Request, res: Response) {
-  const { userId } = getAuth(req);
-  if (!isSuperAdmin(userId)) return res.status(403).json({ error: 'not_super_admin' });
-
   const request = await loadOr404(req, res);
   if (!request) return;
 
@@ -498,9 +557,7 @@ export async function bulk(req: Request, res: Response) {
   if (requests.length === 0) return res.status(404).json({ error: 'not_found' });
 
   if (action === 'delete') {
-    // Same super-admin gate as the single hard delete.
-    if (!isSuperAdmin(userId)) return res.status(403).json({ error: 'not_super_admin' });
-
+    // Same rule as the single hard delete: moderator-or-above, enforced by the router.
     const requestIds = requests.map((request) => request._id);
     await ResearchRequestVote.deleteMany({ requestId: { $in: requestIds } });
     await Notification.deleteMany({ requestId: { $in: requestIds } });

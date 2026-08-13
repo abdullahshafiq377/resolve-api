@@ -16,6 +16,9 @@ export type CommentStatus = (typeof COMMENT_STATUSES)[number];
 export const COMMENT_AUTHOR_TIERS = ['standard', 'premium'] as const;
 export type CommentAuthorTier = (typeof COMMENT_AUTHOR_TIERS)[number];
 
+// `displayName` here is the name as typed into the body, kept so `position`
+// still lines up with the text. Serializers render the chip from the live users
+// mirror instead, so a renamed member is not stuck under their old name.
 export interface CommentMention {
   userId: string;
   displayName: string;
@@ -36,7 +39,12 @@ export interface CommentDoc extends Document {
   rootCommentId: mongoose.Types.ObjectId;
   path: string;
 
-  // Author snapshot (Clerk user id + cached identity at post time).
+  // Author reference. `authorId` is the identity; the display fields below are a
+  // post-time snapshot kept only as a fallback for when the users mirror has no
+  // row (a Clerk webhook that never landed). Serializers join the live mirror
+  // instead — see `loadCommentAuthors` in lib/serializers/comment.ts — so a
+  // member who changes their avatar or name sees it on comments they already
+  // posted. Never read these fields directly in a response.
   authorId: string;
   authorDisplayName: string;
   authorAvatarUrl: string | null;
@@ -93,7 +101,10 @@ const CommentSchema = new Schema<CommentDoc>(
     authorTier: { type: String, enum: COMMENT_AUTHOR_TIERS, required: true, default: 'premium' },
 
     body: { type: Schema.Types.Mixed, required: true },
-    bodyText: { type: String, required: true, default: '' },
+    // Not `required` — Mongoose's String required-validator rejects '', and the
+    // delete / moderator-remove paths blank this out on the surviving placeholder.
+    // Non-emptiness on real posts is enforced by the content validator instead.
+    bodyText: { type: String, default: '' },
     mentions: { type: [MentionSchema], default: [] },
 
     upvotes: { type: Number, default: 0, min: 0 },

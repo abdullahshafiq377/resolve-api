@@ -2,6 +2,7 @@ import { clerk } from '../config/clerk';
 import type { User as ClerkUser } from '@clerk/backend';
 import CommentBan from '../models/CommentBan';
 import ModerationAction from '../models/ModerationAction';
+import User from '../models/User';
 import type { PlanTier } from '../middleware/auth';
 import { isSuperAdmin } from '../middleware/auth';
 
@@ -110,15 +111,24 @@ function planSlugToTier(slug: string | null | undefined): PlanTier | null {
 }
 
 /**
- * Live plan tier for one user, read from Clerk Billing. Tier is not stored
- * anywhere (BACKEND_BILLING.md), so this is the only server-side source — cached
- * for five minutes because it costs one Clerk call per user.
+ * Live plan tier for one user, read from Clerk Billing. Clerk stays the authority
+ * (BACKEND_BILLING.md); this is the only server-side source, cached for five
+ * minutes because it costs one Clerk call per user.
+ *
+ * A resolved tier is also written to the user mirror's `planTier` snapshot, so
+ * aggregate questions Billing cannot answer (how many premium subscribers?) read
+ * a column instead of walking the whole user base. Only a *trusted* read is
+ * stamped: Billing being unavailable reads as free for this request but must not
+ * overwrite a known-premium snapshot with a false free.
  */
 async function resolveTier(userId: string): Promise<PlanTier> {
   const cached = tierCache.get(userId);
   if (cached && Date.now() - cached.at < TIER_TTL_MS) return cached.tier;
 
   let tier: PlanTier = 'free';
+  // A user with no subscription is genuinely free — that 404 is an answer, not a
+  // failure. Anything else means we did not learn the tier.
+  let trusted = true;
   try {
     const subscription = await clerk.billing.getUserBillingSubscription(userId);
     for (const item of subscription.subscriptionItems ?? []) {
@@ -128,15 +138,36 @@ async function resolveTier(userId: string): Promise<PlanTier> {
       if (itemTier === 'premium') tier = 'premium';
       else if (itemTier === 'standard' && tier !== 'premium') tier = 'standard';
     }
-  } catch {
+  } catch (err) {
     // No subscription (404) or Billing unavailable — the user reads as free
     // rather than failing the whole list.
     tier = 'free';
+    trusted = (err as { status?: number })?.status === 404;
   }
 
   tierCache.set(userId, { at: Date.now(), tier });
+  if (trusted) await stampTierSnapshot(userId, tier);
   return tier;
 }
+
+/**
+ * Records a trusted Billing read on the user mirror. Best-effort: the snapshot is
+ * a convenience for aggregate counts, so a write failure must never fail the
+ * request that happened to refresh it.
+ */
+async function stampTierSnapshot(userId: string, tier: PlanTier): Promise<void> {
+  try {
+    await User.updateOne(
+      { clerkUserId: userId },
+      { $set: { planTier: tier, planTierCheckedAt: new Date() } },
+    );
+  } catch {
+    // Ignored by design — see above.
+  }
+}
+
+/** Exposed for the billing-tier reconcile sweep, which refreshes stale snapshots. */
+export { resolveTier };
 
 async function resolveTiers(userIds: string[]): Promise<Map<string, PlanTier>> {
   const out = new Map<string, PlanTier>();

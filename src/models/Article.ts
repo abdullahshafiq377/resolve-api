@@ -31,6 +31,13 @@ export interface ArticleDoc extends Document {
   featuredImageKey?: string;
   audioUrl?: string;
   audioKey?: string;
+  // Denormalised from UploadedAsset when the media is attached, so the admin
+  // editor can name a file whose object key is a UUID. Absent on anything
+  // uploaded before that collection existed — always treat as optional.
+  featuredImageName?: string;
+  featuredImageSize?: number;
+  audioName?: string;
+  audioSize?: number;
   template: (typeof TEMPLATES)[number];
   // When published: the moment it went live. When scheduled: the future moment
   // it is due to go live. Cleared on revert to draft or archive so neither ever
@@ -80,6 +87,10 @@ const ArticleSchema = new Schema<ArticleDoc>(
     featuredImageKey: { type: String, trim: true },
     audioUrl: { type: String, trim: true },
     audioKey: { type: String, trim: true },
+    featuredImageName: { type: String, trim: true },
+    featuredImageSize: { type: Number },
+    audioName: { type: String, trim: true },
+    audioSize: { type: Number },
     template: { type: String, enum: TEMPLATES, required: true },
     publishDate: { type: Date },
     featured: { type: Boolean, default: false },

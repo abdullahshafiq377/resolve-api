@@ -3,7 +3,7 @@ import type { Request, Response, NextFunction } from 'express';
 import { requireSignedIn } from '../middleware/auth';
 import { publicPulseVoteRateLimit } from '../middleware/publicPulseRateLimit';
 import {
-  listActive,
+  listOpen,
   listFeatured,
   listRecent,
   listArchive,
@@ -23,7 +23,7 @@ const wrap =
   (req: Request, res: Response, next: NextFunction) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
-router.get('/', wrap(listActive));
+router.get('/', wrap(listOpen));
 router.get('/featured', wrap(listFeatured));
 router.get('/recent', wrap(listRecent));
 router.get('/archive', wrap(listArchive));

@@ -38,6 +38,16 @@ export interface ResearchRequestDoc extends Document {
   rejectionReason: string | null;
   // Public. Set when status = 'not_pursued'.
   notPursuedReason: string | null;
+  // Internal-only editorial context for the newsroom, written on the admin edit
+  // page. Deliberately absent from `serializePublicRequest` — it is never shown
+  // to readers, only on the admin request view. The byline is stamped server-side
+  // from the acting moderator, so it always reflects who actually wrote it.
+  editorNote: {
+    body: string;
+    authorName: string | null;
+    authorId: string | null;
+    at: Date;
+  } | null;
   linkedArticleId: mongoose.Types.ObjectId | null;
   // Denormalised from Article.slug at link time so the public serializer can
   // avoid a join in the common case.
@@ -73,6 +83,18 @@ const ResearchRequestSchema = new Schema<ResearchRequestDoc>(
     approvedAt: { type: Date, default: null },
     rejectionReason: { type: String, default: null, trim: true, maxlength: 500 },
     notPursuedReason: { type: String, default: null, trim: true, maxlength: 280 },
+    editorNote: {
+      type: new Schema(
+        {
+          body: { type: String, required: true, trim: true, maxlength: 500 },
+          authorName: { type: String, default: null, trim: true },
+          authorId: { type: String, default: null, trim: true },
+          at: { type: Date, default: Date.now },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
     linkedArticleId: { type: Schema.Types.ObjectId, ref: 'Article', default: null },
     linkedArticleSlug: { type: String, default: null, trim: true },
     voteCount: { type: Number, default: 0, min: 0 },

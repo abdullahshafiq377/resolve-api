@@ -1,5 +1,8 @@
 import type { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Article from '../models/Article';
+import { recordActivity } from '../services/activity';
+import { reconcileTierSnapshots } from '../services/billingTiers';
 import { parseBriefDate } from '../services/briefDates';
 import { generateGenericBrief } from '../services/briefGeneric';
 import { processBriefGenerationBatch } from '../services/resolveBriefGeneration';
@@ -49,8 +52,34 @@ export async function articlesPublishDue(req: Request, res: Response) {
     await article.save();
     // Only published articles carry RAG chunks, so index on the way in.
     await syncArticleEmbeddings(article);
+    // No actor: the sweep publishes on the schedule an editor set earlier, so
+    // the timeline attributes it to System.
+    await recordActivity({
+      entityType: 'article',
+      entityId: article._id as mongoose.Types.ObjectId,
+      action: 'auto_published',
+      actorId: null,
+      metadata: { from: 'scheduled', to: 'published', publishDate: article.publishDate?.toISOString() ?? null },
+    });
     published.push(String(article._id));
   }
 
   res.json({ due: due.length, published: published.length, ids: published });
+}
+
+/**
+ * POST /api/cron/billing-tier-reconcile
+ *
+ * Refreshes the oldest stale `User.planTier` snapshots. Run it hourly: each run
+ * touches a bounded batch, so the Clerk Billing call rate stays flat instead of
+ * spiking on a full-population recount. Idempotent — a run with nothing stale is
+ * a no-op.
+ */
+export async function billingTierReconcile(req: Request, res: Response) {
+  assertCron(req);
+  const result = await reconcileTierSnapshots({
+    batchSize: req.body?.batchSize,
+    staleAfterHours: req.body?.staleAfterHours,
+  });
+  res.json(result);
 }

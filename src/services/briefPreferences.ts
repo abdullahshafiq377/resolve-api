@@ -5,7 +5,7 @@ import Region from '../models/Region';
 import { httpError } from '../utils/errors';
 import { findActiveRegionIdsOrThrow } from './regions';
 import { serializeCategory } from './categories';
-import { serializeRegion } from './regions';
+import { serializeRegion, sortRegionsForDisplay } from './regions';
 
 function sortedObjectIds(ids: mongoose.Types.ObjectId[]): mongoose.Types.ObjectId[] {
   return [...ids].sort((a, b) => String(a).localeCompare(String(b)));
@@ -34,14 +34,15 @@ export function serializeBriefPreference(preference: BriefPreferenceDoc | null):
 export async function getPreferencePayload(clerkUserId: string): Promise<Record<string, unknown>> {
   const [preference, categories, regions] = await Promise.all([
     BriefPreference.findOne({ clerkUserId, deletedAt: null }),
-    Category.find({ active: true }).sort({ order: 1, title: 1 }),
-    Region.find({ active: true }).sort({ order: 1, title: 1 }),
+    Category.find({ active: true }).sort({ title: 1 }),
+    Region.find({ active: true }).sort({ title: 1 }),
   ]);
 
   return {
     preference: serializeBriefPreference(preference),
     categories: categories.map(serializeCategory),
-    regions: regions.map(serializeRegion),
+    // Global leads the targeting list; the rest follow alphabetically.
+    regions: sortRegionsForDisplay(regions).map(serializeRegion),
   };
 }
 

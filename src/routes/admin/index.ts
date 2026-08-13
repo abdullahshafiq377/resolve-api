@@ -9,9 +9,11 @@ import commentsRouter from './comments';
 import regionsRouter from './regions';
 import briefsRouter from './briefs';
 import contactMessagesRouter from './contactMessages';
+import overviewRouter from './overview';
 
 const router = express.Router();
 
+router.use('/overview', overviewRouter);
 router.use('/articles', articlesRouter);
 router.use('/shorts', shortsRouter);
 router.use('/categories', categoriesRouter);

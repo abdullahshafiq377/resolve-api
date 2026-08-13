@@ -6,10 +6,13 @@ import BriefRecipient from '../models/BriefRecipient';
 import BriefSegment, { BriefStory } from '../models/BriefSegment';
 import Category from '../models/Category';
 import Region from '../models/Region';
+import { clerk } from '../config/clerk';
+import { enrichStories } from './brief';
 import { sendApprovedSegmentEmails } from '../services/briefEmail';
 import { processBriefGenerationBatch, regenerateSegment } from '../services/resolveBriefGeneration';
 import { parseBriefDate } from '../services/briefDates';
 import { httpError } from '../utils/errors';
+import { parseOrder, parseSortKey, searchRegex } from '../utils/query';
 
 function adminUserId(req: Request): string {
   return getAuth(req).userId || 'admin';
@@ -54,17 +57,100 @@ async function serializeSegment(segment: Awaited<ReturnType<typeof BriefSegment.
   };
 }
 
+// Columns the admin Brief table can be ordered by. `recipients` and `emails`
+// are counts of BriefRecipient rows rather than fields on the segment, so they
+// take the aggregation path below.
+const BRIEF_SORT_KEYS = ['title', 'submitted', 'recipients', 'emails'] as const;
+type BriefSortKey = (typeof BRIEF_SORT_KEYS)[number];
+const COUNT_SORT_FIELDS: Partial<Record<BriefSortKey, string>> = {
+  recipients: 'recipientCount',
+  emails: 'emailSentCount',
+};
+
+// Case- and accent-insensitive ordering for the text columns.
+const LIST_COLLATION = { locale: 'en', strength: 2 } as const;
+
+/**
+ * The ordered page of segment ids when sorting by a recipient count.
+ *
+ * The counts live in BriefRecipient, so ordering by them cannot be a `find`
+ * sort. This resolves the order and the page in one aggregation and returns
+ * only ids — the documents are then loaded and serialized by the usual path,
+ * so the response shape is identical either way.
+ */
+async function pageIdsByCount(
+  filter: Record<string, unknown>,
+  field: string,
+  order: 1 | -1,
+  skip: number,
+  limit: number,
+): Promise<mongoose.Types.ObjectId[]> {
+  const rows = await BriefSegment.aggregate<{ _id: mongoose.Types.ObjectId }>([
+    { $match: filter },
+    {
+      $lookup: {
+        from: BriefRecipient.collection.name,
+        localField: '_id',
+        foreignField: 'segmentId',
+        pipeline: [{ $project: { emailStatus: 1 } }],
+        as: 'recipients',
+      },
+    },
+    {
+      $addFields: {
+        recipientCount: { $size: '$recipients' },
+        emailSentCount: {
+          $size: {
+            $filter: { input: '$recipients', cond: { $eq: ['$$this.emailStatus', 'sent'] } },
+          },
+        },
+      },
+    },
+    { $sort: { [field]: order, _id: order } },
+    { $skip: skip },
+    { $limit: limit },
+    { $project: { _id: 1 } },
+  ]);
+  return rows.map((row) => row._id);
+}
+
 export async function list(req: Request, res: Response) {
   const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string, 10) || 20));
+  const skip = (page - 1) * limit;
   const filter: Record<string, unknown> = { deletedAt: null };
   if (req.query.date) filter.briefDate = parseBriefDate(req.query.date);
   if (req.query.status) filter.status = req.query.status;
 
-  const [segments, total] = await Promise.all([
-    BriefSegment.find(filter).sort({ briefDate: -1, createdAt: -1 }).skip((page - 1) * limit).limit(limit),
-    BriefSegment.countDocuments(filter),
-  ]);
+  // Search runs over the whole collection, not the page in hand. A segment's
+  // title is optional, so the summary is matched too — that is what the table
+  // falls back to displaying.
+  const term = searchRegex(req.query.search);
+  if (term) filter.$or = [{ title: term }, { summary: term }];
+
+  const sortKey = parseSortKey(req.query.sort, BRIEF_SORT_KEYS, 'submitted');
+  const order = parseOrder(req.query.order, sortKey === 'title' ? 1 : -1);
+  const countField = COUNT_SORT_FIELDS[sortKey];
+
+  const total = await BriefSegment.countDocuments(filter);
+  let segments;
+  if (countField) {
+    const ids = await pageIdsByCount(filter, countField, order, skip, limit);
+    const found = await BriefSegment.find({ _id: { $in: ids } });
+    // `find` does not preserve the $in order, so restore the page's order.
+    const byId = new Map(found.map((doc) => [String(doc._id), doc]));
+    segments = ids.map((id) => byId.get(String(id))).filter((doc) => doc !== undefined);
+  } else {
+    segments = await BriefSegment.find(filter)
+      .collation(LIST_COLLATION)
+      .sort(
+        sortKey === 'title'
+          ? { title: order, _id: order }
+          : { briefDate: order, createdAt: order, _id: order },
+      )
+      .skip(skip)
+      .limit(limit);
+  }
   const counts = await segmentCounts(segments.map((segment) => segment._id as mongoose.Types.ObjectId));
   const data = await Promise.all(
     segments.map(async (segment) => {
@@ -75,15 +161,59 @@ export async function list(req: Request, res: Response) {
   res.json({ data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
 }
 
+/**
+ * Recipient rows carry only a Clerk user id, but the admin table names the
+ * reader. One batched Clerk lookup covers the page; a user Clerk no longer
+ * knows about falls back to the bare id rather than dropping the row.
+ */
+async function hydrateRecipients(
+  recipients: Awaited<ReturnType<typeof BriefRecipient.find>>,
+) {
+  const ids = [...new Set(recipients.map((recipient) => recipient.clerkUserId).filter(Boolean))];
+  const byId = new Map<string, { displayName: string; email: string | null; imageUrl: string | null }>();
+  if (ids.length) {
+    try {
+      const list = await clerk.users.getUserList({ userId: ids, limit: ids.length });
+      for (const user of list.data) {
+        const primary =
+          user.emailAddresses.find((email) => email.id === user.primaryEmailAddressId)
+            ?.emailAddress ?? user.emailAddresses[0]?.emailAddress ?? null;
+        const name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim();
+        byId.set(user.id, {
+          displayName: name || user.username || primary || user.id,
+          email: primary,
+          imageUrl: user.imageUrl ?? null,
+        });
+      }
+    } catch {
+      // Clerk being unavailable must not take the whole segment down — the table
+      // degrades to ids.
+    }
+  }
+  return recipients.map((recipient) => {
+    const profile = byId.get(recipient.clerkUserId);
+    return {
+      ...recipient.toObject(),
+      displayName: profile?.displayName ?? recipient.clerkUserId,
+      email: profile?.email ?? null,
+      imageUrl: profile?.imageUrl ?? null,
+    };
+  });
+}
+
 export async function detail(req: Request, res: Response) {
   const segment = await BriefSegment.findById(req.params.id);
   if (!segment) return res.status(404).json({ error: 'not_found' });
-  const [serialized, sourceArticles, recipients] = await Promise.all([
+  const [serialized, sourceArticles, recipientRows, stories] = await Promise.all([
     serializeSegment(segment),
     Article.find({ _id: { $in: segment.sourceArticleIds } }).select('title slug excerpt publishDate categoryId regionIds'),
     BriefRecipient.find({ segmentId: segment._id }).sort({ emailStatus: 1, createdAt: -1 }).limit(100),
+    // The admin view draws each story exactly as the reader sees it, so it needs
+    // the same image / category / read-time enrichment the reader endpoints do.
+    enrichStories(segment.stories),
   ]);
-  res.json({ segment: serialized, sourceArticles, recipients });
+  const recipients = await hydrateRecipients(recipientRows);
+  res.json({ segment: { ...serialized, stories }, sourceArticles, recipients });
 }
 
 function normalizeStories(value: unknown): BriefStory[] {

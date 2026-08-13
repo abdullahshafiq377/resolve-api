@@ -9,6 +9,7 @@ import Article, {
   type GateTier,
 } from '../models/Article';
 import ArticleSummary from '../models/ArticleSummary';
+import { findAssetMeta, recordUploadedAsset } from '../models/UploadedAsset';
 import Category, { CategoryDoc } from '../models/Category';
 import Region from '../models/Region';
 import { generateUniqueSlug } from '../utils/slugify';
@@ -21,10 +22,30 @@ import {
   type AuthorSummary,
 } from '../services/users';
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
+import {
+  actorFromRequest,
+  listActivity,
+  purgeActivity,
+  recordActivities,
+  ACTIVITY_DEFAULT_LIMIT,
+} from '../services/activity';
+import {
+  buildArticleUpdateActivity,
+  diffStatus,
+  toArticleActivity,
+  type ArticleActivityDraft,
+} from '../services/articleActivity';
 import { findCategoryByIdOrThrow, findCategoryBySlug } from '../services/categories';
+import User from '../models/User';
+import { parseOrder, parseSortKey, searchRegex, stableSort } from '../utils/query';
 import ResearchRequest from '../models/ResearchRequest';
 import { sanitizePublicPulseBlocks } from '../services/publicPulse/body';
-import { findActiveRegionIdsOrThrow, getGlobalRegion, serializeRegion } from '../services/regions';
+import {
+  findActiveRegionIdsOrThrow,
+  getGlobalRegion,
+  serializeRegion,
+  sortRegionsForDisplay,
+} from '../services/regions';
 import { getTier } from '../middleware/auth';
 import { clipBodyForAudience, countGateNodes, keepFirstGateNode, type Audience } from '../lib/articleGate';
 
@@ -161,7 +182,7 @@ async function serializeArticle(doc: ArticleDoc, audience: Audience): Promise<Re
   const [users, category, regions, aiSummary] = await Promise.all([
     findUsersByIds([doc.authorId]),
     doc.categoryId ? Category.findById(doc.categoryId) : Promise.resolve(null),
-    Region.find({ _id: { $in: doc.regionIds ?? [] } }).sort({ order: 1, title: 1 }),
+    Region.find({ _id: { $in: doc.regionIds ?? [] } }).sort({ title: 1 }),
     ArticleSummary.findOne({ articleId: doc._id, approved: true }).select('format content'),
   ]);
   const obj = doc.toObject() as Record<string, unknown>;
@@ -169,8 +190,10 @@ async function serializeArticle(doc: ArticleDoc, audience: Audience): Promise<Re
   const user = users[0];
   obj.author = user ? toAuthorSummary(user) : fallbackAuthor(doc.authorId);
   applyCategory(obj, category, doc.category);
-  obj.regions = regions.map(serializeRegion);
-  obj.regionIds = regions.map((region) => String(region._id));
+  // Global leads the list; the rest follow alphabetically.
+  const ordered = sortRegionsForDisplay(regions);
+  obj.regions = ordered.map(serializeRegion);
+  obj.regionIds = ordered.map((region) => String(region._id));
 
   const gateTier = (doc.gateTier ?? null) as GateTier | null;
   const { body, teaser, locked } = clipBodyForAudience(doc.body, gateTier, audience);
@@ -201,6 +224,16 @@ async function serializeArticle(doc: ArticleDoc, audience: Audience): Promise<Re
     delete obj.audioUrl;
     delete obj.audioKey;
   }
+
+  // Upload names and sizes label files in the admin editor. A filename is the
+  // uploader's own words and can carry internal intent ("hero-EMBARGOED.jpg"),
+  // so it does not belong in a reader-facing payload.
+  if (audience !== 'admin') {
+    delete obj.featuredImageName;
+    delete obj.featuredImageSize;
+    delete obj.audioName;
+    delete obj.audioSize;
+  }
   return obj;
 }
 
@@ -215,7 +248,7 @@ async function serializeArticles(docs: ArticleDoc[]): Promise<Record<string, unk
   const [users, categories, regions] = await Promise.all([
     findUsersByIds(ids),
     Category.find({ _id: { $in: categoryIds } }),
-    Region.find({ _id: { $in: regionIds } }).sort({ order: 1, title: 1 }),
+    Region.find({ _id: { $in: regionIds } }).sort({ title: 1 }),
   ]);
   const map = new Map(users.map((u) => [u.clerkUserId, u]));
   const categoryMap = new Map(categories.map((category) => [String(category._id), category]));
@@ -244,6 +277,13 @@ async function serializeArticles(docs: ArticleDoc[]): Promise<Record<string, unk
       delete obj.audioUrl;
       delete obj.audioKey;
     }
+    // Listings are shared between the admin table and public surfaces and are
+    // cached reader-independently, so the upload labels come out of all of them.
+    // Only the single-article admin fetch needs them.
+    delete obj.featuredImageName;
+    delete obj.featuredImageSize;
+    delete obj.audioName;
+    delete obj.audioSize;
     return obj;
   });
 }
@@ -257,7 +297,43 @@ export async function uploadUrl(req: Request, res: Response) {
   }
 
   const result = await createArticleUploadUrl({ filename, contentType, fileSize, type });
+
+  // The key is a UUID, so this is the only moment the real name and size are
+  // known. Recorded here and read back when the media is attached.
+  await recordUploadedAsset({
+    fileKey: result.fileKey,
+    originalName: filename,
+    size: fileSize,
+    contentType,
+    surface: 'article',
+    kind: type ?? 'featured',
+    uploadedBy: getAuth(req).userId ?? undefined,
+  });
+
   res.json(result);
+}
+
+// Columns the admin articles table can be ordered by, mapped onto the fields
+// they actually render. Anything outside this list falls back to publish date.
+const ARTICLE_SORT_KEYS = ['title', 'publishDate', 'status', 'category', 'createdAt', 'updatedAt'] as const;
+const ARTICLE_SORT_FIELDS: Record<(typeof ARTICLE_SORT_KEYS)[number], string> = {
+  title: 'title',
+  publishDate: 'publishDate',
+  status: 'status',
+  category: 'category',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt',
+};
+
+// Case- and accent-insensitive ordering, so "Zeb" does not sort before "apple".
+const COLLATION = { locale: 'en', strength: 2 } as const;
+
+/** Clerk ids whose display name or email matches a search term. */
+async function findUsersMatching(term: RegExp): Promise<string[]> {
+  const users = await User.find({ $or: [{ displayName: term }, { email: term }] })
+    .select('clerkUserId')
+    .lean();
+  return users.map((u) => u.clerkUserId as string);
 }
 
 // GET /api/articles (public — published only) and GET /api/admin/articles (full filter set).
@@ -298,10 +374,34 @@ function buildListHandler(forcePublished: boolean) {
       filter._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
     }
 
+    // Free-text search across the whole collection, not just the page in hand.
+    // The byline lives on the users mirror rather than on the article, so a
+    // matching author is resolved to Clerk ids first and folded into the $or.
+    const term = searchRegex(req.query.search ?? req.query.q);
+    if (term) {
+      const authors = await findUsersMatching(term);
+      const clauses: Record<string, unknown>[] = [
+        { title: term },
+        { slug: term },
+        { excerpt: term },
+        { category: term },
+      ];
+      if (authors.length > 0) clauses.push({ authorId: { $in: authors } });
+      filter.$or = clauses;
+    }
+
+    const sortKey = parseSortKey(req.query.sort, ARTICLE_SORT_KEYS, 'publishDate');
+    const order = parseOrder(req.query.order, sortKey === 'title' ? 1 : -1);
+
     const skip = (page - 1) * limit;
 
     const [articles, total] = await Promise.all([
-      Article.find(filter).sort({ publishDate: -1 }).skip(skip).limit(limit).select('-body'),
+      Article.find(filter)
+        .collation(COLLATION)
+        .sort(stableSort(ARTICLE_SORT_FIELDS[sortKey], order))
+        .skip(skip)
+        .limit(limit)
+        .select('-body'),
       Article.countDocuments(filter),
     ]);
 
@@ -373,11 +473,20 @@ export async function create(req: Request, res: Response) {
   const sanitizedBody = keepFirstGateNode(await sanitizePublicPulseBlocks(body));
   assertGateConsistency(sanitizedBody, nextGateTier);
 
+  // Name and size come from the upload record, never from the request body, so
+  // the label cannot disagree with what was actually uploaded.
+  const imageMeta = featuredImageKey ? await findAssetMeta(featuredImageKey) : null;
+  const audioMeta = audioKey ? await findAssetMeta(audioKey) : null;
+
   const article = await Article.create({
     title, slug, excerpt, authorId, categoryId: categoryDoc._id, category: categoryDoc.title,
     regionIds: selectedRegionIds,
     featuredImage, featuredImageCaption, featuredImageKey,
     audioUrl: audioUrl || undefined, audioKey: audioKey || undefined,
+    featuredImageName: imageMeta?.originalName,
+    featuredImageSize: imageMeta?.size,
+    audioName: audioMeta?.originalName,
+    audioSize: audioMeta?.size,
     template,
     // Publish date is system-managed except when scheduling, where the caller
     // names the future moment the cron should publish: stamped now when
@@ -398,8 +507,30 @@ export async function create(req: Request, res: Response) {
   // never throws and the bodyHash skip makes unchanged re-saves cheap.
   if (article.status === 'published') await syncArticleEmbeddings(article);
 
+  // An article created straight into scheduled/published carries its lifecycle
+  // event too, so the timeline never opens on an unexplained live article.
+  const createdDrafts: ArticleActivityDraft[] = [
+    { action: 'created', metadata: { status: nextStatus } },
+  ];
+  if (nextStatus === 'scheduled') {
+    createdDrafts.push({
+      action: 'scheduled',
+      metadata: { from: 'draft', to: nextStatus, publishDate: article.publishDate?.toISOString() ?? null },
+    });
+  } else if (nextStatus === 'published') {
+    createdDrafts.push({ action: 'published', metadata: { from: 'draft', to: nextStatus } });
+  } else if (nextStatus === 'archived') {
+    createdDrafts.push({ action: 'archived', metadata: { from: 'draft', to: nextStatus } });
+  }
+  await recordActivities(
+    toArticleActivity(article._id as mongoose.Types.ObjectId, actorFromRequest(req), createdDrafts),
+  );
+
   res.status(201).json(await serializeArticle(article, ADMIN_AUDIENCE));
 }
+// Placement flags, in the order the admin table renders them.
+const PLACEMENT_FLAGS = ['featured', 'highlight', 'keyStory', 'topStories'] as const;
+
 
 // PUT /api/admin/articles/:id
 export async function update(req: Request, res: Response) {
@@ -448,6 +579,9 @@ export async function update(req: Request, res: Response) {
   if (nextTopStories && !currentTopStories) await assertTopStoriesLimit(req.params.id);
   if (readTimeMinutes !== undefined) validateReadTime(readTimeMinutes);
 
+  // Captured while building the patch so the activity log can name the target
+  // category rather than its id.
+  let nextCategoryTitle: string | null = null;
   const patch: Record<string, unknown> = {};
   const unset: Record<string, 1> = {};
   if (title !== undefined) {
@@ -460,6 +594,7 @@ export async function update(req: Request, res: Response) {
     const categoryDoc = await findCategoryByIdOrThrow(categoryId);
     patch.categoryId = categoryDoc._id;
     patch.category = categoryDoc.title;
+    nextCategoryTitle = categoryDoc.title;
   }
   if (regionIds !== undefined) {
     patch.regionIds = Array.isArray(regionIds) && regionIds.length > 0
@@ -468,14 +603,40 @@ export async function update(req: Request, res: Response) {
   }
   if (featuredImage !== undefined) patch.featuredImage = featuredImage;
   if (featuredImageCaption !== undefined) patch.featuredImageCaption = featuredImageCaption;
-  if (featuredImageKey !== undefined) patch.featuredImageKey = featuredImageKey;
+  if (featuredImageKey !== undefined) {
+    patch.featuredImageKey = featuredImageKey;
+    // Name and size track the key, and come from the upload record rather than
+    // the request body. An upload predating that collection resolves to null,
+    // so the stale label is cleared instead of left describing the old file.
+    const meta = await findAssetMeta(featuredImageKey);
+    if (meta) {
+      patch.featuredImageName = meta.originalName;
+      patch.featuredImageSize = meta.size;
+    } else {
+      unset.featuredImageName = 1;
+      unset.featuredImageSize = 1;
+    }
+  }
   if (audioUrl !== undefined || isRemovingAudio) {
     if (audioUrl === null || audioUrl === '' || isRemovingAudio) unset.audioUrl = 1;
     else patch.audioUrl = audioUrl;
   }
   if (audioKey !== undefined || isRemovingAudio) {
-    if (audioKey === null || audioKey === '' || isRemovingAudio) unset.audioKey = 1;
-    else patch.audioKey = audioKey;
+    if (audioKey === null || audioKey === '' || isRemovingAudio) {
+      unset.audioKey = 1;
+      unset.audioName = 1;
+      unset.audioSize = 1;
+    } else {
+      patch.audioKey = audioKey;
+      const meta = await findAssetMeta(audioKey);
+      if (meta) {
+        patch.audioName = meta.originalName;
+        patch.audioSize = meta.size;
+      } else {
+        unset.audioName = 1;
+        unset.audioSize = 1;
+      }
+    }
   }
   if (template !== undefined) patch.template = template;
   // Publish date follows status: stamped the moment an article goes live, set
@@ -533,6 +694,22 @@ export async function update(req: Request, res: Response) {
     });
   }
 
+  await recordActivities(
+    toArticleActivity(
+      article!._id as mongoose.Types.ObjectId,
+      actorFromRequest(req),
+      await buildArticleUpdateActivity({
+        current,
+        updated: article!,
+        patch,
+        unset,
+        nextStatus,
+        nextCategoryTitle,
+        nextGateTier,
+      }),
+    ),
+  );
+
   res.json(await serializeArticle(article!, ADMIN_AUDIENCE));
 }
 
@@ -560,11 +737,14 @@ export async function bulk(req: Request, res: Response) {
   const articles = await Article.find({ _id: { $in: objectIds } });
   if (articles.length === 0) return res.status(404).json({ error: 'No articles found' });
 
+  const actorId = actorFromRequest(req);
+
   if (action === 'delete') {
     await Article.deleteMany({ _id: { $in: objectIds } });
     await Promise.all(
       articles.map(async (article) => {
         await purgeArticleChunks(String(article._id));
+        await purgeActivity('article', article._id as mongoose.Types.ObjectId);
         await ArticleSummary.deleteOne({ articleId: article._id });
         if (article.audioKey) {
           await deleteS3Object(article.audioKey).catch((err) => {
@@ -609,6 +789,27 @@ export async function bulk(req: Request, res: Response) {
         );
         if (updated!.status === 'published') await syncArticleEmbeddings(updated!);
         else await purgeArticleChunks(String(updated!._id));
+
+        // Same events a single-article status change records, so a bulk move is
+        // indistinguishable from an individual one in the timeline.
+        const drafts = diffStatus(article.status, nextStatus);
+        if (nextStatus === 'scheduled' && article.status === 'scheduled') {
+          drafts.push({
+            action: 'publish_date_changed',
+            metadata: {
+              from: article.publishDate?.toISOString() ?? null,
+              to: scheduledFor?.toISOString() ?? null,
+            },
+          });
+        }
+        for (const flag of PLACEMENT_FLAGS) {
+          if (!isLive(nextStatus) && article[flag]) {
+            drafts.push({ action: 'placement_changed', metadata: { flag, value: false } });
+          }
+        }
+        await recordActivities(
+          toArticleActivity(article._id as mongoose.Types.ObjectId, actorId, drafts),
+        );
       }),
     );
     return res.json({ action, status: nextStatus, affected: articles.length });
@@ -619,6 +820,18 @@ export async function bulk(req: Request, res: Response) {
     await Article.updateMany(
       { _id: { $in: objectIds } },
       { $set: { categoryId: categoryDoc._id, category: categoryDoc.title } },
+    );
+    await recordActivities(
+      articles
+        .filter((article) => article.category !== categoryDoc.title)
+        .flatMap((article) =>
+          toArticleActivity(article._id as mongoose.Types.ObjectId, actorId, [
+            {
+              action: 'category_changed',
+              metadata: { from: article.category ?? null, to: categoryDoc.title },
+            },
+          ]),
+        ),
     );
     return res.json({ action, categoryId: String(categoryDoc._id), affected: articles.length });
   }
@@ -633,10 +846,34 @@ export async function remove(req: Request, res: Response) {
   // Drop the article's chunks from the RAG index (Phase 2 index hygiene).
   await purgeArticleChunks(String(article._id));
   await ArticleSummary.deleteOne({ articleId: article._id });
+  // The timeline is per-article and there is no longer an article to show it
+  // against, so the log goes with it rather than becoming an orphan.
+  await purgeActivity('article', article._id as mongoose.Types.ObjectId);
   if (article.audioKey) {
     await deleteS3Object(article.audioKey).catch((err) => {
       console.warn('Failed to delete article audio from S3', err);
     });
   }
   res.status(204).send();
+}
+
+/**
+ * GET /api/admin/articles/:id/activity
+ *
+ * Newest-first page of the article's activity timeline. Moderator-only, like
+ * every other admin article route.
+ */
+export async function activity(req: Request, res: Response) {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ error: 'invalid_article_id' });
+  }
+  const exists = await Article.exists({ _id: req.params.id });
+  if (!exists) return res.status(404).json({ error: 'Article not found' });
+
+  res.json(
+    await listActivity('article', req.params.id, {
+      page: Number(req.query.page) || 1,
+      limit: Number(req.query.limit) || ACTIVITY_DEFAULT_LIMIT,
+    }),
+  );
 }

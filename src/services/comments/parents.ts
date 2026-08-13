@@ -29,7 +29,7 @@ export function parentPath(parentType: CommentParentType, slug: string): string 
 // Open-state rules (comments-posting-threading.md §1.1, reconciled with the real
 // status enums):
 //   - Article:         status === 'published'
-//   - Poll:            status === 'active' && closeDate > now
+//   - Poll:            status === 'open' && closeDate > now
 //   - ResearchRequest: approvedAt !== null && status not in ['rejected','not_pursued']
 export async function resolveParentState(
   parentType: CommentParentType,
@@ -55,7 +55,7 @@ export async function resolveParentState(
   if (parentType === 'poll') {
     const doc = await Poll.findById(parentId).select('question slug status closeDate').lean();
     if (!doc) return { found: false, open: false, title: '', slug: '' };
-    const open = doc.status === 'active' && (!doc.closeDate || doc.closeDate > new Date());
+    const open = doc.status === 'open' && (!doc.closeDate || doc.closeDate > new Date());
     return {
       found: true,
       open,

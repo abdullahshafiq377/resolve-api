@@ -37,7 +37,7 @@ router.post('/:id/reject', adminActionRateLimit, wrap(reject));
 router.post('/:id/change-status', adminActionRateLimit, wrap(changeStatus));
 router.post('/:id/link-article', wrap(linkArticle));
 router.post('/:id/unlink-article', wrap(unlinkArticle));
-// Hard delete is super-admin-only; enforced inside the controller.
+// Hard delete is moderator-or-above, like every other route here.
 router.delete('/:id', wrap(hardDelete));
 
 export default router;

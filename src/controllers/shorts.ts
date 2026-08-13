@@ -24,6 +24,12 @@ async function serializeShorts(shorts: ShortDoc[]): Promise<Record<string, unkno
   return shorts.map((short) => {
     const obj = short.toObject() as Record<string, unknown>;
     applyCategory(obj, categoryMap.get(String(short.categoryId)), short.category);
+    // Upload labels are admin-editor metadata: a filename is the uploader's own
+    // words and can carry internal intent, so it stays out of reader payloads.
+    delete obj.videoName;
+    delete obj.videoSize;
+    delete obj.thumbnailName;
+    delete obj.thumbnailSize;
     return obj;
   });
 }

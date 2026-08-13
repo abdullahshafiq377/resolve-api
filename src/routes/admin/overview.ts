@@ -1,6 +1,7 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { articlesPublishDue, billingTierReconcile, resolveBrief } from '../controllers/cron';
+import { requireModerator } from '../../middleware/auth';
+import { queue, summary } from '../../controllers/admin/overview';
 
 const router = express.Router();
 
@@ -9,8 +10,10 @@ const wrap =
   (req: Request, res: Response, next: NextFunction) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
-router.post('/resolve-brief', wrap(resolveBrief));
-router.post('/articles-publish-due', wrap(articlesPublishDue));
-router.post('/billing-tier-reconcile', wrap(billingTierReconcile));
+// The overview reports across every admin surface, so it needs the same gate.
+router.use(requireModerator);
+
+router.get('/', wrap(summary));
+router.get('/queue', wrap(queue));
 
 export default router;
