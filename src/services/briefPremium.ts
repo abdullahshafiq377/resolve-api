@@ -3,10 +3,10 @@ import User from '../models/User';
 
 const SUPER_ADMIN_USER_ID = process.env.SUPER_ADMIN_USER_ID;
 
-// The personalised Resolve Brief is a Standard-tier feature (and above). Any of
+// The personalised Resolve Brief is a Core-tier feature (and above). Any of
 // these active subscription slugs grant it. `premium_plan` is the legacy 2-plan
 // slug, kept so existing subscribers stay eligible until Clerk migrates them.
-export const BRIEF_PLAN_SLUGS = ['standard', 'premium', 'premium_plan'];
+export const BRIEF_PLAN_SLUGS = ['core', 'premium', 'premium_plan'];
 
 export interface BriefEligibility {
   eligible: boolean;

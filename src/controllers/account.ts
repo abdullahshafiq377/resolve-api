@@ -11,6 +11,10 @@ import ResearchRequest from '../models/ResearchRequest';
 import SavedArticle from '../models/SavedArticle';
 import type { CommentParentType } from '../models/Comment';
 import { parentPath } from '../services/comments/parents';
+import {
+  commentTextWithLiveMentions,
+  loadAuthorIdentities,
+} from '../lib/serializers/comment';
 import { pakistanMonthWindow } from '../services/briefDates';
 import { httpError } from '../utils/errors';
 
@@ -23,7 +27,7 @@ import { httpError } from '../utils/errors';
  * activity rollup.
  *
  * `aiConversations` counts persisted chat threads, and threads are only written
- * for Premium members — Free and Standard members therefore always read 0. That
+ * for Premium members — Free and Core members therefore always read 0. That
  * is a known product gap, not a bug in this query (see FINDINGS.md).
  */
 export async function overview(req: Request, res: Response) {
@@ -147,11 +151,20 @@ export async function activityComments(req: Request, res: Response) {
     .sort({ createdAt: -1 })
     .skip(offset)
     .limit(limit + 1)
-    .select('parentType parentId bodyText createdAt')
+    .select('parentType parentId body bodyText mentions createdAt')
     .lean();
 
   const { page: comments, hasMore } = paginate(rows, limit);
-  const parents = await loadCommentParents(comments);
+
+  // Mentions are rendered under the mentioned member's current name, the way the
+  // thread renders them — the excerpt would otherwise be the one place in the
+  // product still showing a renamed member's old name.
+  const mentionIds = [...new Set(comments.flatMap((c) => (c.mentions ?? []).map((m) => m.userId)))];
+  const [parents, identities] = await Promise.all([
+    loadCommentParents(comments),
+    mentionIds.length ? loadAuthorIdentities(mentionIds) : Promise.resolve(new Map()),
+  ]);
+  const mentionNames = new Map([...identities].map(([id, i]) => [id, i.displayName]));
 
   res.json({
     hasMore,
@@ -159,7 +172,10 @@ export async function activityComments(req: Request, res: Response) {
       const parent = parents.get(`${c.parentType}:${String(c.parentId)}`);
       return {
         id: String(c._id),
-        excerpt: excerpt(c.bodyText ?? ''),
+        // Falls back to the stored text for a body that carries no mention marks.
+        excerpt: excerpt(
+          commentTextWithLiveMentions(c.body, mentionNames) || (c.bodyText ?? ''),
+        ),
         parentType: c.parentType,
         parentTitle: parent?.title ?? null,
         // Null when the parent is gone — the row still renders, without a link.
@@ -319,26 +335,58 @@ export async function readingHistory(req: Request, res: Response) {
 }
 
 /**
+ * A second call for the same article inside this window moves `lastReadAt` but
+ * does not count as another read. The client only posts once the reader has
+ * actually engaged, but it cannot dedupe across a hard reload, a second tab or
+ * a return later the same sitting — so the durable guard lives here.
+ *
+ * 30 minutes is chosen to sit above a single sitting with an article and below
+ * "came back to it later", which is a genuine re-read.
+ */
+const READ_COUNT_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
  * POST /api/account/reading-history — record a read. Re-reading an article
  * bumps its existing row instead of adding another, so the panel stays one line
- * per article. The article page only calls this for an unlocked view.
+ * per article. The article page only calls this for an unlocked view, and only
+ * once the reader has dwelled on or scrolled through it.
  */
 export async function recordReadingHistory(req: Request, res: Response) {
   const { userId } = getAuth(req);
   if (!userId) throw httpError(401, 'unauthenticated');
 
   const articleId = await requirePublishedArticle((req.body as { articleId?: unknown })?.articleId);
-  await ReadingHistory.updateOne(
-    { clerkUserId: userId, articleId },
-    {
-      $set: { lastReadAt: new Date() },
-      $inc: { readCount: 1 },
-      $setOnInsert: { clerkUserId: userId, articleId },
-    },
-    // Defaults off on insert: `readCount` is owned by the $inc above, and
-    // letting Mongoose also $setOnInsert it would collide on the same path.
-    { upsert: true, setDefaultsOnInsert: false },
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - READ_COUNT_COOLDOWN_MS);
+
+  // Existing row, last read long enough ago to count again: bump the counter.
+  const counted = await ReadingHistory.updateOne(
+    { clerkUserId: userId, articleId, lastReadAt: { $lte: cutoff } },
+    { $set: { lastReadAt: now }, $inc: { readCount: 1 } },
   );
+  if (counted.matchedCount > 0) {
+    res.status(204).end();
+    return;
+  }
+
+  // Otherwise: either there is no row yet (first read — `readCount` starts at
+  // 1), or there is one inside the cooldown, which only moves up the list.
+  try {
+    await ReadingHistory.updateOne(
+      { clerkUserId: userId, articleId },
+      {
+        $set: { lastReadAt: now },
+        $setOnInsert: { clerkUserId: userId, articleId, readCount: 1 },
+      },
+      // Defaults off on insert: `readCount` is set explicitly above, and letting
+      // Mongoose also default it would collide on the same path.
+      { upsert: true, setDefaultsOnInsert: false },
+    );
+  } catch (err) {
+    // Two tabs racing the same first read: the unique (reader, article) index
+    // rejects the loser. The row exists and is current — nothing to repair.
+    if ((err as { code?: number }).code !== 11000) throw err;
+  }
 
   res.status(204).end();
 }

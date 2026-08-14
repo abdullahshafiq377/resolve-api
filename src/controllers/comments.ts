@@ -196,7 +196,7 @@ export async function createComment(req: Request, res: Response) {
   const status = held ? 'held' : 'visible';
 
   const mirror = await User.findOne({ clerkUserId: userId }).select('displayName imageUrl').lean();
-  const mentions = await resolveMentions(prepared.value.bodyText, userId);
+  const mentions = await resolveMentions(prepared.value.body, prepared.value.bodyText, userId);
 
   const _id = new mongoose.Types.ObjectId();
   const isRoot = level === 0;
@@ -279,7 +279,11 @@ export async function editComment(req: Request, res: Response) {
   }
 
   const previousMentionIds = new Set(comment.mentions.map((m) => m.userId));
-  const mentions = await resolveMentions(prepared.value.bodyText, auth.userId);
+  const mentions = await resolveMentions(
+    prepared.value.body,
+    prepared.value.bodyText,
+    auth.userId,
+  );
 
   // Re-run the block list on edit. Without this a clean comment could be posted
   // and then edited into anything at all inside the 5-minute edit window, which

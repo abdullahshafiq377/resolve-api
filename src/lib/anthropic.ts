@@ -64,7 +64,7 @@ export function isSupportedImageMimeType(mimeType: string): boolean {
 
 // Stable product model keys (NOT the UI labels). Each maps to a provider model
 // id (env) and has a minimum tier; tiers unlock models cumulatively:
-//   Free → velo · Standard → velo, core · Premium → velo, core, max
+//   Free → velo · Core → velo, core · Premium → velo, core, max
 export type ChatModelKey = 'velo' | 'core' | 'max';
 
 export const CHAT_MODEL_KEYS: readonly ChatModelKey[] = ['velo', 'core', 'max'] as const;
@@ -78,7 +78,7 @@ const MODEL_BY_KEY: Record<ChatModelKey, string> = {
 // Highest model key each tier may use (inclusive of all lower keys).
 const MAX_MODEL_FOR_TIER: Record<PlanTier, ChatModelKey> = {
   free: 'velo',
-  standard: 'core',
+  core: 'core',
   premium: 'max',
 };
 

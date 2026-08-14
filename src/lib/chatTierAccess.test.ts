@@ -8,7 +8,7 @@
 //
 // These cover the pure decision functions. What they deliberately do NOT cover is
 // the wiring in controllers/chat.ts that calls them; that still needs a pass on a
-// real free/standard account.
+// real free/core account.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,7 +17,7 @@ import { allowedTiersFor } from '../services/articleEmbeddings';
 import { resolveModelKey, providerModelFor, isSupportedImageMimeType } from './anthropic';
 import { tierAtLeast, type PlanTier } from '../middleware/auth';
 
-const TIERS: PlanTier[] = ['free', 'standard', 'premium'];
+const TIERS: PlanTier[] = ['free', 'core', 'premium'];
 
 // A body with public prose, a gate, then members-only prose.
 function gatedBody() {
@@ -38,20 +38,20 @@ function gatedBody() {
 test('model resolution is server-authoritative', async (t) => {
   await t.test('each tier gets its own ceiling when it asks for nothing', () => {
     assert.equal(resolveModelKey(undefined, 'free'), 'velo');
-    assert.equal(resolveModelKey(undefined, 'standard'), 'core');
+    assert.equal(resolveModelKey(undefined, 'core'), 'core');
     assert.equal(resolveModelKey(undefined, 'premium'), 'max');
   });
 
   await t.test('a request above the tier ceiling is clamped, not honoured', () => {
     assert.equal(resolveModelKey('max', 'free'), 'velo');
     assert.equal(resolveModelKey('core', 'free'), 'velo');
-    assert.equal(resolveModelKey('max', 'standard'), 'core');
+    assert.equal(resolveModelKey('max', 'core'), 'core');
   });
 
   await t.test('a request at or below the ceiling is honoured', () => {
     assert.equal(resolveModelKey('velo', 'premium'), 'velo');
     assert.equal(resolveModelKey('core', 'premium'), 'core');
-    assert.equal(resolveModelKey('velo', 'standard'), 'velo');
+    assert.equal(resolveModelKey('velo', 'core'), 'velo');
   });
 
   await t.test('junk from the client falls back to the ceiling rather than throwing', () => {
@@ -70,8 +70,8 @@ test('model resolution is server-authoritative', async (t) => {
 test('retrieval tier filter never widens', async (t) => {
   await t.test('a tier may read its own tier and below, never above', () => {
     assert.deepEqual(allowedTiersFor('free'), ['free']);
-    assert.deepEqual(allowedTiersFor('standard'), ['free', 'standard']);
-    assert.deepEqual(allowedTiersFor('premium'), ['free', 'standard', 'premium']);
+    assert.deepEqual(allowedTiersFor('core'), ['free', 'core']);
+    assert.deepEqual(allowedTiersFor('premium'), ['free', 'core', 'premium']);
   });
 
   await t.test('the filter agrees with tierAtLeast for every pair', () => {
@@ -98,8 +98,8 @@ test('clipBodyForTier is the paywall', async (t) => {
     assert.match(JSON.stringify(body), /PUBLIC-ONE/);
   });
 
-  await t.test('a standard reader is still locked out of premium prose', () => {
-    const { body, locked } = clipBodyForTier(gatedBody(), 'premium', 'standard');
+  await t.test('a core reader is still locked out of premium prose', () => {
+    const { body, locked } = clipBodyForTier(gatedBody(), 'premium', 'core');
     assert.equal(locked, true);
     assert.doesNotMatch(JSON.stringify(body), secret);
   });

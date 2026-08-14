@@ -211,9 +211,10 @@ export async function archive(req: Request, res: Response) {
   res.json({ data, pagination: { total, page, limit, pages: Math.ceil(total / limit) } });
 }
 
-// GET /api/brief/generic - the shared free brief for any signed-in user.
-export async function getGeneric(req: Request, res: Response) {
-  userIdOrThrow(req);
+// GET /api/brief/generic - the shared free brief. Public: the payload is the
+// same edition for everyone and holds no per-user data, so signed-out readers
+// get it too and are prompted to sign in at the actions instead.
+export async function getGeneric(_req: Request, res: Response) {
   const segment = await BriefSegment.findOne({
     isGeneric: true,
     status: 'approved',

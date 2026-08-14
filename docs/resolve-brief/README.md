@@ -22,7 +22,7 @@ User routes:
 
 - `GET/PUT /api/brief/preferences` is signed-in.
 - `GET /api/brief/generic` is signed-in and returns the shared free Brief.
-- `GET /api/brief/latest`, `/archive`, and `/:id` require standard-or-above.
+- `GET /api/brief/latest`, `/archive`, and `/:id` require core-or-above.
 
 Admin and cron routes:
 
@@ -39,7 +39,7 @@ Important behavior:
 - Segments store generated story selections, summaries, source article IDs, and
   approval state.
 - Recipients snapshot the preference used for a generated Brief.
-- Eligibility checks Clerk billing subscription slugs `standard`, `premium`, and
+- Eligibility checks Clerk billing subscription slugs `core`, `premium`, and
   legacy `premium_plan`; moderators and super admin are eligible.
 - Email delivery uses Resend through `briefEmail`.
 

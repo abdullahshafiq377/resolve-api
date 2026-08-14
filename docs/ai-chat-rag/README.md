@@ -23,15 +23,15 @@ Routes:
 Tiers and limits:
 
 - Free: 4 successful messages per rolling 24-hour window.
-- Standard: 30 successful messages per rolling 24-hour window.
+- Core: 30 successful messages per rolling 24-hour window.
 - Premium: uncapped daily usage.
-- Paid tiers (`standard` and `premium`) get persisted conversation history.
+- Paid tiers (`core` and `premium`) get persisted conversation history.
 - A separate in-memory burst limiter applies to all signed-in users.
 
 Model selection:
 
 - Product keys are `velo`, `core`, and `max`.
-- Free can use `velo`; standard can use `velo` and `core`; premium can use all
+- Free can use `velo`; core can use `velo` and `core`; premium can use all
   three.
 - Backend clamps unknown or out-of-tier model keys in `resolveModel`.
 - Provider model IDs come from `GEMINI_CHAT_MODEL`,

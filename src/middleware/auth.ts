@@ -26,19 +26,19 @@ interface RoleClaims {
   metadata?: { role?: Role };
 }
 
-// Plan tiers are ordered: free < standard < premium. Slugs used by Clerk's plan
+// Plan tiers are ordered: free < core < premium. Slugs used by Clerk's plan
 // claim require the `user:` namespace prefix. The legacy `premium_plan` slug is
 // still honoured as premium so subscribers from the 2-plan era keep access until
 // Clerk migrates them onto the new `premium` plan.
-export type PlanTier = 'free' | 'standard' | 'premium';
+export type PlanTier = 'free' | 'core' | 'premium';
 
-const TIER_ORDER: PlanTier[] = ['free', 'standard', 'premium'];
+const TIER_ORDER: PlanTier[] = ['free', 'core', 'premium'];
 
-const STANDARD_PLAN = 'user:standard';
+const CORE_PLAN = 'user:core';
 const PREMIUM_PLAN = 'user:premium';
 const LEGACY_PREMIUM_PLAN = 'user:premium_plan';
 
-// True if `tier` is at least `min` in the free < standard < premium ordering.
+// True if `tier` is at least `min` in the free < core < premium ordering.
 export function tierAtLeast(tier: PlanTier, min: PlanTier): boolean {
   return TIER_ORDER.indexOf(tier) >= TIER_ORDER.indexOf(min);
 }
@@ -85,7 +85,7 @@ export function getTier(auth: PremiumAuth): PlanTier {
   if (has && (has({ plan: PREMIUM_PLAN }) || has({ plan: LEGACY_PREMIUM_PLAN }))) {
     return 'premium';
   }
-  if (has && has({ plan: STANDARD_PLAN })) return 'standard';
+  if (has && has({ plan: CORE_PLAN })) return 'core';
   return 'free';
 }
 
@@ -94,20 +94,20 @@ export function isPremium(auth: PremiumAuth): boolean {
   return getTier(auth) === 'premium';
 }
 
-// Any paid tier (standard or premium). Used by Standard-level features such as
+// Any paid tier (core or premium). Used by Core-level features such as
 // the Resolve Brief and persistent chat history.
-export function hasStandard(auth: PremiumAuth): boolean {
-  return tierAtLeast(getTier(auth), 'standard');
+export function hasCore(auth: PremiumAuth): boolean {
+  return tierAtLeast(getTier(auth), 'core');
 }
 
-// Require at least Standard (any paid tier). 401 if signed out, 403 if Free.
-export function requireStandard(req: Request, res: Response, next: NextFunction): void {
+// Require at least Core (any paid tier). 401 if signed out, 403 if Free.
+export function requireCore(req: Request, res: Response, next: NextFunction): void {
   const { userId } = getAuth(req);
   if (!userId) {
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (hasStandard(getAuth(req))) {
+  if (hasCore(getAuth(req))) {
     next();
     return;
   }

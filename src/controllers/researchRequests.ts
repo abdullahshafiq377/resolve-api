@@ -10,10 +10,12 @@ import { toSlug, generateUniqueSlug } from '../utils/slugify';
 import {
   PUBLIC_VISIBILITY_FILTER,
   buildLookupMaps,
+  getRequestAllowance,
   getVotedRequestIds,
   parsePagination,
   buildPagination,
 } from '../services/researchRequests';
+import { getTier } from '../middleware/auth';
 import {
   serializePublicRequest,
   serializeLinkedArticle,
@@ -139,8 +141,26 @@ export async function getBySlug(req: Request, res: Response) {
 
 // POST /api/research-requests — submit a new request (signed-in, not banned).
 export async function submit(req: Request, res: Response) {
-  const { userId } = getAuth(req);
+  const auth = getAuth(req);
+  const { userId } = auth;
   if (!userId) return res.status(401).json({ error: 'unauthorized' });
+
+  // Monthly allowance, enforced against the tier Clerk reports (the same source
+  // the account meter reads through GET /api/account/research-requests/allowance).
+  // Checked before any other work so a capped reader is rejected cheaply.
+  //
+  // Two submissions racing each other can both pass this read and land one over
+  // the cap; a count is not a lock. Acceptable at this shape — the overshoot is
+  // one request and the next attempt is refused.
+  const allowance = await getRequestAllowance(userId, getTier(auth));
+  if (allowance.limit !== null && allowance.used >= allowance.limit) {
+    return res.status(429).json({
+      error: 'monthly_limit',
+      used: allowance.used,
+      limit: allowance.limit,
+      resetAt: allowance.resetAt,
+    });
+  }
 
   // Shape/length already enforced by validate(submitResearchRequestSchema) on the
   // route; title/description arrive trimmed. categoryId still resolved below.
@@ -319,6 +339,16 @@ export async function accountSubmissions(req: Request, res: Response) {
     data: requests.map((r) => serializeAccountRequest(r, { userMap, categoryMap })),
     pagination: buildPagination(total, page, limit),
   });
+}
+
+// GET /api/account/research-requests/allowance — this month's submission
+// allowance for the signed-in reader. Same numbers `submit` enforces, so the
+// meter cannot drift from the cap.
+export async function accountAllowance(req: Request, res: Response) {
+  const auth = getAuth(req);
+  if (!auth.userId) return res.status(401).json({ error: 'unauthorized' });
+  const tier = getTier(auth);
+  res.json({ ...(await getRequestAllowance(auth.userId, tier)), tier });
 }
 
 // GET /api/account/research-requests/upvoted — requests the user upvoted.

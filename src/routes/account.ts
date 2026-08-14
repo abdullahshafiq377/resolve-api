@@ -3,7 +3,11 @@ import type { Request, Response, NextFunction } from 'express';
 import { requireSignedIn } from '../middleware/auth';
 import { requireNotBanned } from '../middleware/requireNotBanned';
 import { validate } from '../middleware/validate';
-import { accountSubmissions, accountUpvoted } from '../controllers/researchRequests';
+import {
+  accountAllowance,
+  accountSubmissions,
+  accountUpvoted,
+} from '../controllers/researchRequests';
 import {
   activityComments,
   overview,
@@ -30,6 +34,12 @@ const wrap =
 
 router.get('/overview', requireSignedIn, requireNotBanned, wrap(overview));
 router.get('/research-requests', requireSignedIn, requireNotBanned, wrap(accountSubmissions));
+router.get(
+  '/research-requests/allowance',
+  requireSignedIn,
+  requireNotBanned,
+  wrap(accountAllowance),
+);
 router.get(
   '/research-requests/upvoted',
   requireSignedIn,

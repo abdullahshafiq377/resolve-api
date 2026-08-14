@@ -28,6 +28,15 @@ function sanitizeHref(href: unknown): string | null {
   return null;
 }
 
+// Clerk ids are short opaque strings ("user_2ab…"); anything longer or of another
+// shape did not come from the mention picker and is dropped rather than stored.
+function sanitizeMentionUserId(userId: unknown): string | null {
+  if (typeof userId !== 'string') return null;
+  const trimmed = userId.trim();
+  if (!trimmed || trimmed.length > 128) return null;
+  return /^[A-Za-z0-9_-]+$/.test(trimmed) ? trimmed : null;
+}
+
 function sanitizeMarks(marks: any[]): any[] {
   const out: any[] = [];
   for (const mark of marks) {
@@ -36,6 +45,13 @@ function sanitizeMarks(marks: any[]): any[] {
       const href = sanitizeHref(mark.attrs?.href);
       if (!href) continue;
       out.push({ type: 'link', attrs: { href, target: '_blank', rel: 'noopener noreferrer' } });
+    } else if (mark.type === 'mention') {
+      // The mention's identity, not its typed text, is what makes it a mention:
+      // the id survives the mentioned member renaming themselves, and it is what
+      // `resolveMentions` reads. A mark without one is kept as plain styling —
+      // legacy comments and hand-typed "@name" both land there.
+      const userId = sanitizeMentionUserId(mark.attrs?.userId);
+      out.push(userId ? { type: 'mention', attrs: { userId } } : { type: 'mention' });
     } else {
       out.push({ type: mark.type });
     }

@@ -5,7 +5,7 @@ import Article, { type GateTier } from '../models/Article';
 import ChatUsage from '../models/ChatUsage';
 import Conversation, { ConversationDoc } from '../models/Conversation';
 import ChatMessage from '../models/ChatMessage';
-import { getTier, hasStandard, tierAtLeast, type PlanTier } from '../middleware/auth';
+import { getTier, hasCore, tierAtLeast, type PlanTier } from '../middleware/auth';
 import {
   streamChat,
   resolveModelKey,
@@ -23,16 +23,16 @@ import { getBriefForChat, type BriefChatContext } from '../services/briefChatCon
 
 // ── Constants (overview §3) ─────────────────────────────────────────────────
 const FREE_DAILY_LIMIT = 4;
-const STANDARD_DAILY_LIMIT = 30;
+const CORE_DAILY_LIMIT = 30;
 // Rolling tiered window: 24h measured from each user's FIRST message, not a
 // shared calendar day. See models/ChatUsage. Premium is uncapped.
 const FREE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-// Per-day message cap by tier. Premium is unlimited; free and standard are
+// Per-day message cap by tier. Premium is unlimited; free and core are
 // counted against the rolling window above.
 function limitForTier(tier: PlanTier): number {
   if (tier === 'premium') return Infinity;
-  if (tier === 'standard') return STANDARD_DAILY_LIMIT;
+  if (tier === 'core') return CORE_DAILY_LIMIT;
   return FREE_DAILY_LIMIT;
 }
 const HISTORY_MAX_TURNS = 10;
@@ -222,15 +222,15 @@ ${brief.summary}
 ${stories || '(no individual stories)'}`;
 }
 
-const PLAN_LABEL: Record<PlanTier, string> = { free: 'Free', standard: 'Standard', premium: 'Premium' };
+const PLAN_LABEL: Record<PlanTier, string> = { free: 'Free', core: 'Core', premium: 'Premium' };
 
 // How the model should pitch the locked article, given what the reader already
-// pays for. A Standard subscriber is not a prospect — they have already bought
+// pays for. A Core subscriber is not a prospect — they have already bought
 // in, and asking them to "subscribe" reads as though we forgot. They extend;
 // only a free reader joins.
 function upgradeToneInstruction(tier: PlanTier): string {
-  if (tier === 'standard') {
-    return `The reader is ALREADY a paying Resolve subscriber on the Standard plan. Frame Premium as extending the plan they already have — never as a new or second purchase. Do not use the words "subscribe", "subscription", "buy", "purchase", or "pay", and never imply they are not already a member or do not have a plan. Say something like "that one's part of Premium, which builds on your Standard plan".`;
+  if (tier === 'core') {
+    return `The reader is ALREADY a paying Resolve subscriber on the Core plan. Frame Premium as extending the plan they already have — never as a new or second purchase. Do not use the words "subscribe", "subscription", "buy", "purchase", or "pay", and never imply they are not already a member or do not have a plan. Say something like "that one's part of Premium, which builds on your Core plan".`;
   }
   return `The reader is on the free plan and does not have a subscription yet. Invite them to subscribe to the plan named above, warmly and without pressure.`;
 }
@@ -383,9 +383,9 @@ export async function postChat(req: Request, res: Response): Promise<void> {
   }
   const clerkUserId = auth.userId;
   const tier = getTier(auth);
-  // Paid tiers (standard, premium) get persistent conversation history.
-  const paid = tierAtLeast(tier, 'standard');
-  // Non-premium tiers (free, standard) are capped by the rolling daily window.
+  // Paid tiers (core, premium) get persistent conversation history.
+  const paid = tierAtLeast(tier, 'core');
+  // Non-premium tiers (free, core) are capped by the rolling daily window.
   const limited = tier !== 'premium';
   const dailyLimit = limitForTier(tier);
 
@@ -586,7 +586,7 @@ export async function postChat(req: Request, res: Response): Promise<void> {
   }
 
   // ── Success: persist (paid) + count (non-premium), then terminal frame ──────
-  // These are independent: a Standard user BOTH persists history AND advances the
+  // These are independent: a Core user BOTH persists history AND advances the
   // daily counter, so they are separate branches rather than if/else.
   let donePayload: Record<string, unknown> = { done: true };
   try {
@@ -752,7 +752,7 @@ export async function listConversations(req: Request, res: Response): Promise<vo
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (!hasStandard(auth)) {
+  if (!hasCore(auth)) {
     res.status(403).json({ error: 'forbidden' });
     return;
   }
@@ -789,7 +789,7 @@ export async function getConversationDetail(req: Request, res: Response): Promis
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (!hasStandard(auth)) {
+  if (!hasCore(auth)) {
     res.status(403).json({ error: 'forbidden' });
     return;
   }
@@ -856,7 +856,7 @@ export async function renameConversation(req: Request, res: Response): Promise<v
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (!hasStandard(auth)) {
+  if (!hasCore(auth)) {
     res.status(403).json({ error: 'forbidden' });
     return;
   }
@@ -901,7 +901,7 @@ export async function deleteConversation(req: Request, res: Response): Promise<v
     res.status(401).json({ error: 'unauthenticated' });
     return;
   }
-  if (!hasStandard(auth)) {
+  if (!hasCore(auth)) {
     res.status(403).json({ error: 'forbidden' });
     return;
   }

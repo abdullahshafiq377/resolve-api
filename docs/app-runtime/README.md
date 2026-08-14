@@ -15,7 +15,7 @@ Important implementation details:
   because that route needs the raw body for Svix verification.
 - `ensureDb` runs for `/api/*` requests before route handlers.
 - `clerkAuth` is mounted globally and populates auth context; individual routes
-  still opt into `requireSignedIn`, `requireModerator`, `requireStandard`, or
+  still opt into `requireSignedIn`, `requireModerator`, `requireCore`, or
   `requireSuperAdmin`.
 - The API exposes `/health` outside the `/api` router.
 - Vercel routes traffic to `src/app.ts`; long-lived deployments should run

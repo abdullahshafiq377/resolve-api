@@ -1,7 +1,7 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
 import type { PlanTier } from '../middleware/auth';
 
-const TIERS: PlanTier[] = ['free', 'standard', 'premium'];
+const TIERS: PlanTier[] = ['free', 'core', 'premium'];
 
 // A ~800-token slice of a published article's plain text plus its Voyage
 // embedding (Phase 2 RAG). One article -> many chunks, keyed by chunkIndex.

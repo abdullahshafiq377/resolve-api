@@ -17,7 +17,7 @@ import { purgeUserResearchData } from '../../services/userResearchCascade';
 
 const STATUSES: UserStatus[] = ['active', 'warned', 'banned', 'frozen'];
 const SORT_KEYS: UserSortKey[] = ['user', 'tier', 'role', 'status', 'joined'];
-const TIERS: PlanTier[] = ['free', 'standard', 'premium'];
+const TIERS: PlanTier[] = ['free', 'core', 'premium'];
 
 // Bulk actions the users table can run on a selection. `freeze`/`unfreeze` are the
 // Clerk-level account ban; `comment_ban` is the tiered commenting restriction.

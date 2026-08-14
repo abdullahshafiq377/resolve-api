@@ -81,6 +81,55 @@ function serializeMentions(comment: CommentDoc, authors: CommentAuthorMap) {
   }));
 }
 
+/**
+ * Plain text of a comment body with every mention rendered under the mentioned
+ * member's *current* display name, rather than the name as it was typed.
+ *
+ * `Comment.bodyText` cannot do this: it is the text as written, so a mention of
+ * someone who has since renamed themselves is frozen under the old name. Any
+ * surface that shows body text outside the thread (the account Activity excerpt,
+ * and notification/email copy if it grows one) should build it from here.
+ *
+ * A mention mark with no `userId`, or one whose id is absent from `names`, keeps
+ * its typed text — legacy comments and hand-typed "@name" both land there.
+ */
+export function commentTextWithLiveMentions(
+  body: unknown,
+  names: Map<string, string>,
+): string {
+  const parts: string[] = [];
+
+  function walk(node: unknown): void {
+    if (!node || typeof node !== 'object') return;
+    const n = node as {
+      type?: string;
+      text?: string;
+      marks?: { type?: string; attrs?: { userId?: unknown } }[];
+      content?: unknown[];
+    };
+
+    if (n.type === 'text') {
+      const mention = n.marks?.find((m) => m.type === 'mention');
+      const userId = typeof mention?.attrs?.userId === 'string' ? mention.attrs.userId : null;
+      const live = userId ? names.get(userId) : undefined;
+      parts.push(live ? `@${live}` : (n.text ?? ''));
+      return;
+    }
+    if (n.type === 'hardBreak') {
+      parts.push(' ');
+      return;
+    }
+    if (Array.isArray(n.content)) {
+      for (const child of n.content) walk(child);
+      // Block boundary: keep paragraphs from running into each other.
+      parts.push(' ');
+    }
+  }
+
+  walk(body);
+  return parts.join('').replace(/\s+/g, ' ').trim();
+}
+
 export interface CommentSerializeContext {
   // Map of commentId -> the requester's vote (1 | -1). Absent = no vote / signed out.
   userVotes: Map<string, 1 | -1>;

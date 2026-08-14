@@ -106,7 +106,7 @@ function planSlugToTier(slug: string | null | undefined): PlanTier | null {
   // 2-plan slug `premium_plan` still maps to premium (middleware/auth.ts).
   const bare = slug.includes(':') ? slug.split(':').pop() ?? slug : slug;
   if (bare === 'premium' || bare === 'premium_plan') return 'premium';
-  if (bare === 'standard') return 'standard';
+  if (bare === 'core') return 'core';
   return null;
 }
 
@@ -136,7 +136,7 @@ async function resolveTier(userId: string): Promise<PlanTier> {
       const itemTier = planSlugToTier(item.plan?.slug ?? null);
       // A user can hold several items; the highest paid one wins.
       if (itemTier === 'premium') tier = 'premium';
-      else if (itemTier === 'standard' && tier !== 'premium') tier = 'standard';
+      else if (itemTier === 'core' && tier !== 'premium') tier = 'core';
     }
   } catch (err) {
     // No subscription (404) or Billing unavailable — the user reads as free
@@ -203,7 +203,7 @@ function statusOf(row: {
 }
 
 const STATUS_ORDER: Record<UserStatus, number> = { active: 0, warned: 1, banned: 2, frozen: 3 };
-const TIER_ORDER: Record<PlanTier, number> = { free: 0, standard: 1, premium: 2 };
+const TIER_ORDER: Record<PlanTier, number> = { free: 0, core: 1, premium: 2 };
 
 export async function listAdminUsers(
   params: AdminUserListParams,

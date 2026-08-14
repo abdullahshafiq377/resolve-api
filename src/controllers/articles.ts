@@ -199,7 +199,7 @@ async function serializeArticle(doc: ArticleDoc, audience: Audience): Promise<Re
   const { body, teaser, locked } = clipBodyForAudience(doc.body, gateTier, audience);
   obj.gateTier = gateTier;
   obj.body = body;
-  // `viewerTier` is for copy only — the gate card addresses a Standard member
+  // `viewerTier` is for copy only — the gate card addresses a Core member
   // differently from a signed-out reader. Returned from here rather than
   // re-derived on the frontend so there's one authority on what plan someone is
   // on. Never a permission signal: the body above is already clipped.

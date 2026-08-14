@@ -5,15 +5,19 @@ export const COMMENT_PARENT_TYPES = ['article', 'poll', 'researchRequest'] as co
 export type CommentParentType = (typeof COMMENT_PARENT_TYPES)[number];
 
 // Lifecycle states. `held` is caught by the block list and never surfaces
-// publicly. `deleted_by_user` / `removed` keep the row (placeholder) so the
-// thread structure survives; a reply-less self-delete hard-deletes the row instead.
+// publicly. `deleted_by_user` / `removed` always keep the row as a placeholder,
+// with the body and mentions blanked — deletion is never destructive here, and
+// nothing in this collection is ever hard-deleted on a user's own delete,
+// whether or not the comment has replies. A reader sees a "[deleted]" tombstone
+// in place of the text; the row itself stays so the thread structure, counters
+// and any replies hanging off it survive.
 export const COMMENT_STATUSES = ['visible', 'held', 'removed', 'deleted_by_user'] as const;
 export type CommentStatus = (typeof COMMENT_STATUSES)[number];
 
 // Snapshot of the author's tier at post time. Only premium-tier users (premium
 // plan, or moderators/super admins who inherit it) can post, so this is
 // effectively always 'premium' today; kept as an enum for forward-compatibility.
-export const COMMENT_AUTHOR_TIERS = ['standard', 'premium'] as const;
+export const COMMENT_AUTHOR_TIERS = ['core', 'premium'] as const;
 export type CommentAuthorTier = (typeof COMMENT_AUTHOR_TIERS)[number];
 
 // `displayName` here is the name as typed into the body, kept so `position`

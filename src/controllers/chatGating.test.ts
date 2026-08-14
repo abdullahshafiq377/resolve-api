@@ -7,7 +7,7 @@
 // regress silently — a reordered await or a hardcoded tier still passes every
 // unit test underneath it.
 //
-// The plan's first choice was a signed-in free/standard session against the live
+// The plan's first choice was a signed-in free/core session against the live
 // endpoint. This is its documented alternative: mock `@clerk/express` and drive
 // `postChat` directly. It needs no account and no network, so it runs in `npm test`
 // on every change rather than once by hand.
@@ -38,7 +38,7 @@ function authFor(tier: PlanTier | 'signed-out') {
   const base = { tokenType: 'session_token' as const, sessionClaims: {} };
   if (tier === 'signed-out') return { ...base, userId: null, has: () => false };
   const plans: Record<Exclude<PlanTier, 'free'>, string> = {
-    standard: 'user:standard',
+    core: 'user:core',
     premium: 'user:premium',
   };
   const granted = tier === 'free' ? [] : [plans[tier]];
@@ -265,10 +265,10 @@ test('postChat gating', async (t) => {
     assert.deepEqual(state.jsonBody, { error: 'article_gated', requiredTier: 'premium' });
   });
 
-  await t.test('a standard reader is refused a premium-gated article', async () => {
+  await t.test('a core reader is refused a premium-gated article', async () => {
     // The interesting middle case: paid, but not paid enough. A boolean
     // is-subscriber check instead of the tier ordering would let this through.
-    const state = await articleTurn('standard', 'premium');
+    const state = await articleTurn('core', 'premium');
     assert.equal(state.statusCode, 403);
     assert.deepEqual(state.jsonBody, { error: 'article_gated', requiredTier: 'premium' });
   });
@@ -283,7 +283,7 @@ test('postChat gating', async (t) => {
   });
 
   await t.test('gated text never reaches the provider or the client', async () => {
-    const state = await articleTurn('free', 'standard');
+    const state = await articleTurn('free', 'core');
     assert.equal(state.statusCode, 403);
     const written = state.chunks.join('') + JSON.stringify(state.jsonBody ?? '');
     assert.doesNotMatch(written, /PAYWALLED-SENTINEL/);
@@ -300,8 +300,8 @@ test('postChat gating', async (t) => {
     assert.match(state.chunks.join(''), /generation_failed/);
   });
 
-  await t.test('a standard reader clears a standard gate', async () => {
-    const state = await articleTurn('standard', 'standard');
+  await t.test('a core reader clears a core gate', async () => {
+    const state = await articleTurn('core', 'core');
     assert.notEqual(state.statusCode, 403);
     assert.equal(streamChatCalls.length, 1);
   });
@@ -334,7 +334,7 @@ test('postChat passes the caller-resolved tier into retrieval', async (t) => {
   // Retrieval is gated by the `requiredTier` filter inside the Atlas query, which
   // is only as good as the tier handed to it. A constant here (or a tier read from
   // the request body) would defeat the filter without failing anything downstream.
-  for (const tier of ['free', 'standard', 'premium'] as PlanTier[]) {
+  for (const tier of ['free', 'core', 'premium'] as PlanTier[]) {
     await t.test(`scope:'resolve' as ${tier}`, async () => {
       reset();
       currentAuth = authFor(tier);
@@ -382,7 +382,7 @@ test('getConversationDetail reports whether the article is still readable', asyn
   }
 
   await t.test('locked when the reader has dropped below the gate', async () => {
-    const body = await resumeAs('standard', 'premium');
+    const body = await resumeAs('core', 'premium');
     assert.deepEqual(body.articleAccess, { gateTier: 'premium', locked: true });
   });
 
@@ -392,7 +392,7 @@ test('getConversationDetail reports whether the article is still readable', asyn
   });
 
   await t.test('an ungated article is never reported locked', async () => {
-    const body = await resumeAs('standard', null);
+    const body = await resumeAs('core', null);
     assert.deepEqual(body.articleAccess, { gateTier: null, locked: false });
   });
 
@@ -413,11 +413,11 @@ test('getConversationDetail reports whether the article is still readable', asyn
     // 403s is the exact dead end this field exists to remove. Paid tiers only —
     // free readers never reach resume (above).
     for (const [tier, gateTier] of [
-      ['standard', 'premium'],
+      ['core', 'premium'],
       ['premium', 'premium'],
-      ['standard', 'standard'],
+      ['core', 'core'],
       ['premium', null],
-      ['standard', null],
+      ['core', null],
     ] as [PlanTier, PlanTier | null][]) {
       const body = await resumeAs(tier, gateTier);
       const sendState = await articleTurn(tier, gateTier);

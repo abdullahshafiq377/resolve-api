@@ -6,6 +6,7 @@ import Notification, {
 import { notify } from '../realtime/notify';
 import { sendEmail } from '../email/resend';
 import { renderEmail, type EmailTemplateKey, type EmailTemplateVars } from './templates';
+import { isMuted, mutedUserIds } from './preferences';
 
 const FANOUT_CONCURRENCY = Number(process.env.RESEARCH_REQUESTS_FANOUT_CONCURRENCY) || 50;
 const FANOUT_SYNC_THRESHOLD = Number(process.env.RESEARCH_REQUESTS_FANOUT_SYNC_THRESHOLD) || 1000;
@@ -27,6 +28,12 @@ export interface FireInput {
     template: EmailTemplateKey;
     vars: EmailTemplateVars;
   };
+  /**
+   * Internal: set by `fanOut`, which has already dropped opted-out recipients in
+   * one query. Callers outside this module should leave it unset and let `fire`
+   * do the check.
+   */
+  preferenceChecked?: boolean;
 }
 
 function isHighSignal(type: NotificationType): boolean {
@@ -36,7 +43,15 @@ function isHighSignal(type: NotificationType): boolean {
 // Persist a notification (deduped for high-signal types via the partial unique
 // index), push it over the socket, and optionally send an email. Never throws —
 // email/socket failures are isolated so one recipient can't break a fan-out.
+//
+// Returns null when the recipient has this type switched off in their account
+// notification preferences: nothing is written, pushed or emailed, so the type
+// disappears from their inbox rather than piling up unread there. Only the types
+// the Notifications section actually offers a switch for can be suppressed —
+// see PREFERENCE_BY_TYPE.
 export async function fire(input: FireInput) {
+  if (!input.preferenceChecked && (await isMuted(input.userId, input.type))) return null;
+
   const wantsEmail = Boolean(input.email);
 
   let row;
@@ -147,8 +162,16 @@ export interface FanOutInput {
 // large ones (> threshold) are dispatched in the background so the HTTP response
 // returns promptly. Concurrency is capped to protect the email provider + pool.
 export async function fanOut(input: FanOutInput): Promise<{ deferred: boolean }> {
-  const run = () =>
-    mapWithConcurrency(input.recipients, FANOUT_CONCURRENCY, (recipient) =>
+  const run = async () => {
+    // One preferences query for the whole fan-out rather than one per recipient
+    // inside fire(); the survivors are then fired with the check already done.
+    const muted = await mutedUserIds(
+      input.recipients.map((recipient) => recipient.userId),
+      input.type,
+    );
+    const recipients = input.recipients.filter((recipient) => !muted.has(recipient.userId));
+
+    await mapWithConcurrency(recipients, FANOUT_CONCURRENCY, (recipient) =>
       fire({
         userId: recipient.userId,
         type: input.type,
@@ -156,12 +179,14 @@ export async function fanOut(input: FanOutInput): Promise<{ deferred: boolean }>
         title: input.title,
         body: input.body,
         link: input.link,
+        preferenceChecked: true,
         email:
           input.emailTemplate && input.emailVars
             ? { to: recipient.email, template: input.emailTemplate, vars: input.emailVars }
             : undefined,
       }).then(() => undefined),
     );
+  };
 
   if (input.recipients.length > FANOUT_SYNC_THRESHOLD) {
     // Detach: let the response return; the queue drains in-process.

@@ -70,7 +70,7 @@ export async function getBriefForChat(
   clerkUserId: string,
   tier: PlanTier,
 ): Promise<BriefChatContext | null> {
-  if (tierAtLeast(tier, 'standard')) {
+  if (tierAtLeast(tier, 'core')) {
     const personalised = await getPremiumBrief(clerkUserId);
     if (personalised) return personalised;
   }

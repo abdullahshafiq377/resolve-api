@@ -41,7 +41,7 @@ export function isIndexAlreadyExistsError(message: string): boolean {
   return /already ?exists|already defined|Duplicate Index/i.test(message);
 }
 
-const TIER_ORDER: PlanTier[] = ['free', 'standard', 'premium'];
+const TIER_ORDER: PlanTier[] = ['free', 'core', 'premium'];
 
 // Tiers whose chunks `tier` may retrieve, for the Atlas `$in` filter.
 export function allowedTiersFor(tier: PlanTier): PlanTier[] {

@@ -13,7 +13,7 @@ export const ARTICLE_STATUSES = ['draft', 'scheduled', 'published', 'archived'] 
 export type ArticleStatus = (typeof ARTICLE_STATUSES)[number];
 // Minimum plan tier required to read past the `gate` node in the body. Only the
 // paid tiers are gateable — an ungated article has no gateTier at all.
-export const GATE_TIERS = ['standard', 'premium'] as const;
+export const GATE_TIERS = ['core', 'premium'] as const;
 export type GateTier = (typeof GATE_TIERS)[number];
 
 export interface ArticleDoc extends Document {

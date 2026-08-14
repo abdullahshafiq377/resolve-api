@@ -164,17 +164,31 @@ export function invalidateBlockListCache(): void {
   cache = null;
 }
 
-// Bump the usage counters for the terms a comment tripped. Fire-and-forget: the
-// moderation decision has already been made, and a failed counter write must not
-// fail the comment. Errors are swallowed rather than left unhandled.
-function recordHits(ids: string[]): void {
+// Bump the usage counters for the terms a comment tripped.
+//
+// Awaited by the caller rather than fire-and-forget. This runs on the Vercel
+// serverless entry (`app.ts`) as well as the long-lived server, and there the
+// instance can be frozen the moment the response is sent — an unawaited write
+// is simply dropped, which is how a counter silently stays at zero. Same
+// reasoning as the embedding sync in `controllers/articles.ts`.
+//
+// It still cannot fail a comment: the moderation decision is already made by
+// the time this runs, and the error is swallowed. Awaiting costs one indexed
+// `_id` write on the held path only, which is the rare one.
+//
+// `$max` rather than `$set` on `lastHitAt`: two comments tripping the same term
+// concurrently would otherwise race, and the loser could push the timestamp
+// backwards. `$max` also sets the field when it is missing.
+async function recordHits(ids: string[]): Promise<void> {
   if (!ids.length) return;
-  void BlockedKeyword.updateMany(
-    { _id: { $in: ids } },
-    { $inc: { hitCount: 1 }, $set: { lastHitAt: new Date() } },
-  ).catch(() => {
+  try {
+    await BlockedKeyword.updateMany(
+      { _id: { $in: ids } },
+      { $inc: { hitCount: 1 }, $max: { lastHitAt: new Date() } },
+    );
+  } catch {
     /* counters are reporting only — never block moderation on them */
-  });
+  }
 }
 
 // Returns true if the comment should be held. The matched term is deliberately
@@ -189,6 +203,6 @@ export async function isBlocked(bodyText: string): Promise<boolean> {
   // clean comment costs the same full scan either way.
   const hits = terms.filter((compiled) => matchesTerm(haystack, compiled));
   if (!hits.length) return false;
-  recordHits(hits.map((hit) => hit.id).filter((id): id is string => Boolean(id)));
+  await recordHits(hits.map((hit) => hit.id).filter((id): id is string => Boolean(id)));
   return true;
 }

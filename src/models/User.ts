@@ -8,7 +8,7 @@ import mongoose, { Schema, Document, Model } from 'mongoose';
 export type UserRole = 'moderator';
 
 /** Mirrors PlanTier in middleware/auth, duplicated to keep the model dependency-free. */
-export type UserPlanTier = 'free' | 'standard' | 'premium';
+export type UserPlanTier = 'free' | 'core' | 'premium';
 
 export interface UserDoc extends Document {
   clerkUserId: string;
@@ -43,7 +43,7 @@ const UserSchema = new Schema<UserDoc>(
       enum: ['moderator'],
       default: null,
     },
-    planTier: { type: String, enum: ['free', 'standard', 'premium'], default: null },
+    planTier: { type: String, enum: ['free', 'core', 'premium'], default: null },
     planTierCheckedAt: { type: Date, default: null },
     deletedAt: { type: Date, default: null },
   },
