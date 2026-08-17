@@ -12,12 +12,10 @@ import Poll, {
   type PollDoc,
 } from '../../models/Poll';
 import PollVote from '../../models/PollVote';
-import Article from '../../models/Article';
 import Category from '../../models/Category';
 import { generateUniquePollSlug } from '../../services/publicPulse/slug';
-import { bodyContainsPublicPulse } from '../../services/publicPulse/body';
 import { parseOrder, parseSortKey, searchRegex, stableSort } from '../../utils/query';
-import { serializeAdminPoll, serializeResults } from '../../services/publicPulse/serializers';
+import { serializeAdminPoll } from '../../services/publicPulse/serializers';
 import {
   ACTIVITY_DEFAULT_LIMIT,
   listActivity,
@@ -413,34 +411,6 @@ export async function activity(req: Request, res: Response) {
       limit: Number(req.query.limit) || ACTIVITY_DEFAULT_LIMIT,
     }),
   );
-}
-
-export async function metrics(req: Request, res: Response) {
-  const poll = await loadOr404(req, res);
-  if (!poll) return;
-  const pollId = poll._id as mongoose.Types.ObjectId;
-  const since = new Date(Date.now() - 13 * 24 * 60 * 60 * 1000);
-  const votes = await PollVote.find({ pollId, updatedAt: { $gte: since } });
-  const buckets = new Map<string, number>();
-  for (let i = 0; i < 14; i += 1) {
-    const day = new Date(since);
-    day.setDate(since.getDate() + i);
-    buckets.set(day.toISOString().slice(0, 10), 0);
-  }
-  votes.forEach((vote) => {
-    const key = vote.updatedAt.toISOString().slice(0, 10);
-    buckets.set(key, (buckets.get(key) ?? 0) + 1);
-  });
-  const articles = await Article.find({ status: 'published' }).select('body');
-  const pollIdString = String(poll._id);
-  res.json({
-    pollId: pollIdString,
-    totalVotes: poll.totalVotes,
-    uniqueVoters: poll.totalVotes,
-    options: serializeResults(poll).options,
-    votesOverTime: [...buckets.entries()].map(([date, count]) => ({ date, count })),
-    embeddedInCount: articles.filter((article) => bodyContainsPublicPulse(article.body, pollIdString)).length,
-  });
 }
 
 // Why a single poll was left out of a batch. Stable codes, not sentences — the

@@ -22,6 +22,7 @@ import {
   type AuthorSummary,
 } from '../services/users';
 import { syncArticleEmbeddings, purgeArticleChunks } from '../services/articleEmbeddings';
+import { hasExtractableText } from '../lib/articleText';
 import {
   actorFromRequest,
   listActivity,
@@ -88,6 +89,16 @@ function assertGateConsistency(body: unknown, gateTier: GateTier | undefined): v
   if (!gateTier && gates > 0) {
     throw httpError(400, 'gate_node_without_gate_tier');
   }
+}
+
+// A live (or soon-to-be-live) article must carry prose. An empty body embeds to
+// zero chunks, so the article would look published everywhere while being absent
+// from every AI answer — the silent state FINDINGS A3 describes. Drafts and
+// archived articles are exempt: an empty draft is just work in progress.
+function assertPublishableBody(body: unknown, status: ArticleStatus): void {
+  if (status !== 'published' && status !== 'scheduled') return;
+  if (hasExtractableText(body)) return;
+  throw httpError(400, 'empty_body_cannot_publish');
 }
 
 function normalizeStatus(value: unknown, fallback: ArticleStatus = 'draft'): ArticleStatus {
@@ -472,6 +483,7 @@ export async function create(req: Request, res: Response) {
   const nextGateTier = normalizeGateTier(gateTier);
   const sanitizedBody = keepFirstGateNode(await sanitizePublicPulseBlocks(body));
   assertGateConsistency(sanitizedBody, nextGateTier);
+  assertPublishableBody(sanitizedBody, nextStatus);
 
   // Name and size come from the upload record, never from the request body, so
   // the label cannot disagree with what was actually uploaded.
@@ -662,7 +674,9 @@ export async function update(req: Request, res: Response) {
   // against the *resulting* pair — dropping the gate node without clearing the
   // tier (or vice versa) has to fail here, not at render time.
   const nextGateTier = normalizeGateTier(gateTier, current.gateTier);
-  assertGateConsistency(body !== undefined ? patch.body : current.body, nextGateTier);
+  const nextBody = body !== undefined ? patch.body : current.body;
+  assertGateConsistency(nextBody, nextGateTier);
+  assertPublishableBody(nextBody, nextStatus);
   if (gateTier !== undefined || body !== undefined) {
     if (nextGateTier) patch.gateTier = nextGateTier;
     else if (current.gateTier) unset.gateTier = 1;
@@ -762,6 +776,20 @@ export async function bulk(req: Request, res: Response) {
       nextStatus === 'scheduled'
         ? normalizeScheduledDate((req.body as { publishDate?: unknown }).publishDate)
         : null;
+
+    // Same publish gate the single-article handlers apply, checked for the whole
+    // selection before anything is written: a bulk move must not half-succeed and
+    // leave the caller guessing which articles went live.
+    const emptyBodied =
+      nextStatus === 'published' || nextStatus === 'scheduled'
+        ? articles.filter((article) => !hasExtractableText(article.body))
+        : [];
+    if (emptyBodied.length > 0) {
+      return res.status(400).json({
+        error: 'empty_body_cannot_publish',
+        slugs: emptyBodied.map((article) => article.slug),
+      });
+    }
 
     await Promise.all(
       articles.map(async (article) => {

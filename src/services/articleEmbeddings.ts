@@ -77,7 +77,15 @@ export async function syncArticleEmbeddings(
     const { pre, post } = extractGatedPlainText(article.body, gateTier);
 
     if (!pre && !post) {
-      // Published but no extractable prose — ensure no stale chunks linger.
+      // Published but no extractable prose. The write paths refuse this now
+      // (`empty_body_cannot_publish`), so reaching here means legacy content or
+      // a body shape the extractor does not understand — either way the article
+      // is live and invisible to every AI answer, which is worth saying out loud
+      // rather than returning quietly. See FINDINGS A3.
+      console.warn(
+        `syncArticleEmbeddings: no extractable text for published article ${article.slug} (${String(article._id)}) — it will not appear in any AI answer`,
+      );
+      // Ensure no stale chunks linger.
       await purgeArticleChunks(articleId);
       await Article.updateOne({ _id: articleId }, { $unset: { bodyHash: 1 } });
       return;

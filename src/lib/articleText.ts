@@ -141,6 +141,16 @@ export function extractPlainText(body: JSONContent): string {
     .trim();
 }
 
+// True when a body carries at least one character of extractable prose.
+//
+// This is the publish gate for FINDINGS A3: an article with no extractable text
+// produces no chunks, so it is published everywhere (admin, site, sitemap) while
+// being absent from every AI answer. Same extraction the embedding path runs, so
+// "publishable" and "retrievable" cannot drift apart.
+export function hasExtractableText(body: JSONContent): boolean {
+  return extractPlainText(body).length > 0;
+}
+
 // Plain text either side of the gate. `pre` is public; `post` needs the
 // article's gateTier. Chunking each half separately is what keeps a single
 // embedded chunk from straddling the gate and leaking gated prose to a reader

@@ -1,0 +1,46 @@
+{
+  "_id": "6a2a77408defb7c54ddf3148",
+  "title": "Remittance Resilience: How Overseas Workers Are Steadying the Rupee",
+  "slug": "remittance-resilience-how-overseas-workers-are-steadying-the-rupee",
+  "excerpt": "Record inflows through formal channels have eased pressure on reserves, but economists warn the cushion is sensitive to Gulf labour-market shifts.",
+  "authorId": "user_3EcLemFTaFqmhX0YKvwH49sT40E",
+  "category": "Economy and Business",
+  "featuredImage": "https://resolve-webapp-media.s3.eu-north-1.amazonaws.com/articles/featured/2026/06/e4191103-7ae1-4be3-b1e2-a5825a2c0c9a.jpg",
+  "featuredImageCaption": "",
+  "template": "standard",
+  "featured": false,
+  "highlight": false,
+  "status": "published",
+  "readTimeMinutes": 1,
+  "body": {
+    "type": "doc",
+    "content": [
+      {
+        "type": "paragraph"
+      }
+    ]
+  },
+  "createdAt": "2026-06-11T08:52:16.042Z",
+  "updatedAt": "2026-08-03T08:36:09.412Z",
+  "__v": 0,
+  "categoryId": "6a2bf7d22965b60c644fdc76",
+  "regionIds": [
+    "6a2e92194d6fe194b7fbd1e4"
+  ],
+  "aiSummary": {
+    "approved": true,
+    "content": "Test for BUG-5.",
+    "format": "paragraph",
+    "generatedAt": "2026-06-15T15:16:15.191Z",
+    "generatedBy": "editor",
+    "approvedAt": "2026-06-15T15:16:17.048Z",
+    "approvedBy": "user_3EcLemFTaFqmhX0YKvwH49sT40E"
+  },
+  "audioKey": "articles/audio/2026/06/81e7eecf-fcf6-43a9-b871-f53f6a8abd54.mp3",
+  "audioUrl": "https://resolve-webapp-media.s3.eu-north-1.amazonaws.com/articles/audio/2026/06/81e7eecf-fcf6-43a9-b871-f53f6a8abd54.mp3",
+  "fromResearchRequest": true,
+  "researchRequestId": "6a32a80056ce5ba773ae2aca",
+  "commentCount": 4,
+  "topStories": true,
+  "publishDate": "2026-08-03T02:10:24.461Z"
+}
