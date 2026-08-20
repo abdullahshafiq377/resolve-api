@@ -8,14 +8,18 @@ import { httpError } from '../utils/errors';
 
 export const GLOBAL_REGION_SLUG = 'global';
 
+/**
+ * The seeded regions. Not a display order — `sortRegionsForDisplay` sorts by
+ * title and pins Global first, so this array's sequence carries no meaning.
+ */
 export const DEFAULT_REGIONS = [
-  { title: 'Global', slug: 'global', order: 0 },
-  { title: 'South Asia', slug: 'south-asia', order: 10 },
-  { title: 'Middle East', slug: 'middle-east', order: 20 },
-  { title: 'North America', slug: 'north-america', order: 30 },
-  { title: 'Europe', slug: 'europe', order: 40 },
-  { title: 'Africa', slug: 'africa', order: 50 },
-  { title: 'East Asia', slug: 'east-asia', order: 60 },
+  { title: 'Global', slug: 'global' },
+  { title: 'South Asia', slug: 'south-asia' },
+  { title: 'Middle East', slug: 'middle-east' },
+  { title: 'North America', slug: 'north-america' },
+  { title: 'Europe', slug: 'europe' },
+  { title: 'Africa', slug: 'africa' },
+  { title: 'East Asia', slug: 'east-asia' },
 ] as const;
 
 export function serializeRegion(region: RegionDoc): Record<string, unknown> {
@@ -34,7 +38,6 @@ export async function ensureDefaultRegions(): Promise<RegionDoc[]> {
           title: spec.title,
           slug: spec.slug,
           active: true,
-          order: spec.order,
         },
       },
       { new: true, upsert: true },
@@ -47,7 +50,7 @@ export async function ensureDefaultRegions(): Promise<RegionDoc[]> {
 export async function getGlobalRegion(): Promise<RegionDoc> {
   const global = await Region.findOneAndUpdate(
     { slug: GLOBAL_REGION_SLUG },
-    { $setOnInsert: { title: 'Global', slug: GLOBAL_REGION_SLUG, active: true, order: 0 } },
+    { $setOnInsert: { title: 'Global', slug: GLOBAL_REGION_SLUG, active: true } },
     { new: true, upsert: true },
   );
   return global;
@@ -149,10 +152,10 @@ export async function reassignRegionContent(
 /**
  * Global first, then alphabetical.
  *
- * Manual ordering was dropped from the admin screens, so nothing keeps the
- * `order` numbers honest any more. Global still has to lead every targeting list
- * — it is the fallback every reader falls back to — so it is pinned here rather
- * than left to sort under G.
+ * Manual ordering was dropped from the admin screens, and the dead `order`
+ * field with it. Global still has to lead every targeting list — it is the
+ * fallback every reader falls back to — so it is pinned here rather than left
+ * to sort under G.
  */
 export function sortRegionsForDisplay<T extends { slug: string; title: string }>(regions: T[]): T[] {
   return [...regions].sort((a, b) => {

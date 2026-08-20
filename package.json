@@ -24,6 +24,7 @@
     "migrate:plan-core-rename": "tsx src/scripts/migratePlanCoreRename.ts",
     "migrate:poll-open-status": "tsx src/scripts/migratePollOpenStatus.ts",
     "migrate:unset-poll-results-mode": "tsx src/scripts/unsetPollResultsMode.ts",
+    "migrate:unset-taxonomy-order": "tsx src/scripts/unsetTaxonomyOrder.ts",
     "migrate:brief-story-urls": "tsx src/scripts/migrateBriefStoryUrls.ts",
     "backfill:embeddings": "tsx src/scripts/backfillEmbeddings.ts",
     "seed:articles": "tsx src/scripts/seedArticles.ts",

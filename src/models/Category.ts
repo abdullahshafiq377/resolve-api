@@ -13,7 +13,6 @@ export interface CategoryDoc extends Document {
    */
   previousSlugs: string[];
   active: boolean;
-  order: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -24,11 +23,14 @@ const CategorySchema = new Schema<CategoryDoc>(
     slug: { type: String, required: true, unique: true, trim: true, index: true },
     previousSlugs: { type: [String], default: [], index: true },
     active: { type: Boolean, default: true, index: true },
-    order: { type: Number, default: 0 },
   },
   { timestamps: true },
 );
 
+// Categories read alphabetically everywhere — see the `listPublic` comment in
+// `controllers/categories.ts`. There is no manual `order`; documents written
+// before it was dropped are cleaned by
+// `npm run migrate:unset-taxonomy-order` (`F-023`).
 const Category: Model<CategoryDoc> =
   mongoose.models.Category || mongoose.model<CategoryDoc>('Category', CategorySchema);
 

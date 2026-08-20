@@ -6,12 +6,18 @@ import Poll from '../models/Poll';
 import ResearchRequest from '../models/ResearchRequest';
 import { httpError } from '../utils/errors';
 
+/**
+ * The seeded categories, and the legacy labels each one absorbs.
+ *
+ * Order here is not display order — every list sorts by title — so this array
+ * is free to read in whatever sequence is clearest.
+ */
 export const DEFAULT_CATEGORIES = [
-  { title: 'Defense and Security', slug: 'defense-and-security', legacy: ['Defence'], order: 10 },
-  { title: 'Geopolitics', slug: 'geopolitics', legacy: ['Geopolitics'], order: 20 },
-  { title: 'Politics', slug: 'politics', legacy: ['Politics'], order: 30 },
-  { title: 'Economy and Business', slug: 'economy-and-business', legacy: ['Economy'], order: 40 },
-  { title: 'Opinion and Analysis', slug: 'opinion-and-analysis', legacy: ['Opinion'], order: 50 },
+  { title: 'Defense and Security', slug: 'defense-and-security', legacy: ['Defence'] },
+  { title: 'Geopolitics', slug: 'geopolitics', legacy: ['Geopolitics'] },
+  { title: 'Politics', slug: 'politics', legacy: ['Politics'] },
+  { title: 'Economy and Business', slug: 'economy-and-business', legacy: ['Economy'] },
+  { title: 'Opinion and Analysis', slug: 'opinion-and-analysis', legacy: ['Opinion'] },
 ] as const;
 
 export function serializeCategory(category: CategoryDoc): Record<string, unknown> {
@@ -105,7 +111,7 @@ export async function ensureDefaultCategories(): Promise<Map<string, CategoryDoc
   for (const spec of DEFAULT_CATEGORIES) {
     const category = await Category.findOneAndUpdate(
       { slug: spec.slug },
-      { $setOnInsert: { title: spec.title, slug: spec.slug, active: true, order: spec.order } },
+      { $setOnInsert: { title: spec.title, slug: spec.slug, active: true } },
       { new: true, upsert: true },
     );
     for (const legacy of spec.legacy) map.set(legacy, category);
