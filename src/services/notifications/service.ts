@@ -116,6 +116,9 @@ export async function fire(input: FireInput) {
       row.emailStatus = result.status;
       if (result.status === 'sent' || result.status === 'failed') row.emailSentAt = new Date();
       if (result.status === 'failed') row.emailError = result.error ?? 'unknown';
+      // Without the message id the delivery webhook has nothing to match on, so
+      // a bounce for this notification would land nowhere (`F-041`).
+      if (result.status === 'sent') row.emailMessageId = result.messageId ?? null;
       await row.save();
     }
   }

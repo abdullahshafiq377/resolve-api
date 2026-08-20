@@ -122,6 +122,20 @@ services:
         value: https://resolve-webapp.vercel.app
       - key: RESOLVE_BRIEF_EMAIL_BATCH_SIZE
         value: "10"
+      # Delivery is the cron's job, not approval's (`F-012`): approving a segment
+      # only marks it approved, and POST /api/cron/brief-email-dispatch sends the
+      # mail. Schedule it every minute or two alongside articles-publish-due —
+      # until something calls it, an approved Brief reaches nobody.
+      # Roughly the most emails one dispatch run sends before stopping and leaving
+      # the rest queued. Sends are serial, so this is a wall-clock budget against
+      # the caller's HTTP timeout (cron-job.org allows 30s).
+      - key: RESOLVE_BRIEF_EMAIL_DISPATCH_MAX
+        value: "100"
+      # Attempts one recipient gets from the dispatcher before it stops trying.
+      # Without it, an address that can never work is re-sent every run for ever.
+      # The admin "retry delivery" button ignores this ceiling on purpose.
+      - key: RESOLVE_BRIEF_EMAIL_MAX_RETRIES
+        value: "3"
 
       # ── Research Requests: email ──────────────────────────────
       - key: RESEARCH_REQUESTS_EMAIL_FROM

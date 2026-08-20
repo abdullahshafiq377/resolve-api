@@ -2,6 +2,7 @@ import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import {
   approve,
+  bulk,
   detail,
   generate,
   list,
@@ -22,6 +23,8 @@ const wrap =
 router.use(requireModerator);
 router.get('/', wrap(list));
 router.post('/generate', wrap(generate));
+// Before `/:id` handlers so `bulk` is never read as a segment id.
+router.post('/bulk', wrap(bulk));
 router.get('/:id', wrap(detail));
 router.put('/:id', wrap(update));
 router.post('/:id/approve', wrap(approve));

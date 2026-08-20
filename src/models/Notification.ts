@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document, Model } from 'mongoose';
+import { EMAIL_DELIVERY_OUTCOMES, type EmailDeliveryOutcome } from './emailDelivery';
 
 export const NOTIFICATION_TYPES = [
   'request_submitted',
@@ -97,6 +98,14 @@ export interface NotificationDoc extends Document {
   emailStatus: EmailStatus;
   emailSentAt: Date | null;
   emailError: string | null;
+  // Resend's id for the accepted message, and what it reported afterwards via
+  // /api/webhooks/resend (`F-041`). `emailStatus: 'sent'` only ever meant the
+  // provider accepted it; without these a bounced notification email looked the
+  // same as one that landed.
+  emailMessageId: string | null;
+  emailDelivery: EmailDeliveryOutcome;
+  emailDeliveryAt: Date | null;
+  emailDeliveryDetail: string | null;
   read: boolean;
   readAt: Date | null;
   createdAt: Date;
@@ -117,12 +126,19 @@ const NotificationSchema = new Schema<NotificationDoc>(
     emailStatus: { type: String, enum: EMAIL_STATUSES, default: 'not_applicable' },
     emailSentAt: { type: Date, default: null },
     emailError: { type: String, default: null, maxlength: 500 },
+    emailMessageId: { type: String, default: null },
+    emailDelivery: { type: String, enum: EMAIL_DELIVERY_OUTCOMES, default: 'unknown' },
+    emailDeliveryAt: { type: Date, default: null },
+    emailDeliveryDetail: { type: String, default: null, maxlength: 500 },
     read: { type: Boolean, default: false },
     readAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
 
+// The Resend webhook arrives with a message id and nothing else to match on.
+// Sparse: only rows whose email Resend accepted carry one.
+NotificationSchema.index({ emailMessageId: 1 }, { sparse: true });
 // Inbox list (newest first).
 NotificationSchema.index({ userId: 1, createdAt: -1 });
 // Unread badge count + unread list.

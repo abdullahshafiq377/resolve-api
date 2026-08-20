@@ -4,6 +4,7 @@ import Article from '../models/Article';
 import { recordActivity } from '../services/activity';
 import { reconcileTierSnapshots } from '../services/billingTiers';
 import { parseBriefDate } from '../services/briefDates';
+import { dispatchQueuedBriefEmails } from '../services/briefEmail';
 import { generateGenericBrief } from '../services/briefGeneric';
 import { processBriefGenerationBatch } from '../services/resolveBriefGeneration';
 import { syncArticleEmbeddings } from '../services/articleEmbeddings';
@@ -65,6 +66,28 @@ export async function articlesPublishDue(req: Request, res: Response) {
   }
 
   res.json({ due: due.length, published: published.length, ids: published });
+}
+
+/**
+ * POST /api/cron/brief-email-dispatch
+ *
+ * Sends the Brief to everyone still queued for it, across every approved segment
+ * (`F-012`). Run it on a short interval — a minute or two — from the moment
+ * approvals start: approval no longer sends anything itself, it only marks the
+ * segment approved, so until this runs no reader gets mail.
+ *
+ * Idempotent and resumable. Each run works to a bounded email budget and stops;
+ * `capped: true` in the response means there was more to send and the next run
+ * will continue from the same place, so a large segment drains over several runs
+ * instead of failing one long request. A run with an empty queue is a no-op.
+ */
+export async function briefEmailDispatch(req: Request, res: Response) {
+  assertCron(req);
+  const result = await dispatchQueuedBriefEmails({
+    maxEmails: req.body?.maxEmails,
+    maxRetries: req.body?.maxRetries,
+  });
+  res.json(result);
 }
 
 /**

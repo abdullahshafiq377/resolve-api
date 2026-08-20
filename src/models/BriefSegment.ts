@@ -13,6 +13,21 @@ export interface BriefStory {
   order: number;
 }
 
+/**
+ * One edition of this segment that was approved and whose emails went out, kept
+ * after a later regeneration replaced it. The mail recipients hold cannot be
+ * recalled, so the segment records that it was superseded rather than quietly
+ * dropping back to `draft` as if it had never been sent (`F-013`).
+ */
+export interface BriefPriorDelivery {
+  approvedAt: Date | null;
+  approvedBy: string | null;
+  /** Recipients whose email had already been sent when this edition was replaced. */
+  emailSentCount: number;
+  supersededAt: Date;
+  supersededBy: string;
+}
+
 export interface BriefSegmentDoc extends Document {
   briefDate: string;
   signatureHash: string;
@@ -42,6 +57,7 @@ export interface BriefSegmentDoc extends Document {
   rejectedAt: Date | null;
   rejectedBy: string | null;
   rejectionReason: string | null;
+  priorDeliveries: BriefPriorDelivery[];
   deletedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
@@ -53,6 +69,17 @@ const BriefStorySchema = new Schema<BriefStory>(
     headline: { type: String, required: true, trim: true },
     url: { type: String, required: true, trim: true },
     order: { type: Number, required: true },
+  },
+  { _id: false },
+);
+
+const BriefPriorDeliverySchema = new Schema<BriefPriorDelivery>(
+  {
+    approvedAt: { type: Date, default: null },
+    approvedBy: { type: String, default: null },
+    emailSentCount: { type: Number, required: true },
+    supersededAt: { type: Date, required: true },
+    supersededBy: { type: String, required: true },
   },
   { _id: false },
 );
@@ -83,6 +110,7 @@ const BriefSegmentSchema = new Schema<BriefSegmentDoc>(
     rejectedAt: { type: Date, default: null },
     rejectedBy: { type: String, default: null },
     rejectionReason: { type: String, default: null },
+    priorDeliveries: { type: [BriefPriorDeliverySchema], default: [] },
     deletedAt: { type: Date, default: null },
   },
   { timestamps: true },

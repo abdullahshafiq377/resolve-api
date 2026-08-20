@@ -1,6 +1,11 @@
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { articlesPublishDue, billingTierReconcile, resolveBrief } from '../controllers/cron';
+import {
+  articlesPublishDue,
+  billingTierReconcile,
+  briefEmailDispatch,
+  resolveBrief,
+} from '../controllers/cron';
 
 const router = express.Router();
 
@@ -11,6 +16,7 @@ const wrap =
 
 router.post('/resolve-brief', wrap(resolveBrief));
 router.post('/articles-publish-due', wrap(articlesPublishDue));
+router.post('/brief-email-dispatch', wrap(briefEmailDispatch));
 router.post('/billing-tier-reconcile', wrap(billingTierReconcile));
 
 export default router;

@@ -6,6 +6,7 @@ import { connectDB } from './config/db';
 import { clerkAuth } from './middleware/auth';
 import apiRouter from './routes';
 import clerkWebhookRouter from './routes/webhooks/clerk';
+import resendWebhookRouter from './routes/webhooks/resend';
 import { normalizeError } from './utils/errors';
 
 // Last-resort safety net: log stray async errors instead of letting an
@@ -58,6 +59,10 @@ async function ensureDb(req: Request, res: Response, next: NextFunction): Promis
 // Clerk webhook needs the RAW body for svix signature verification, so it MUST be
 // mounted BEFORE express.json(). It connects its own DB for the user-sync writes.
 app.use('/api/webhooks/clerk', ensureDb, clerkWebhookRouter);
+
+// Same constraint, same reason: Resend signs with svix over the raw bytes. This
+// is what turns "Resend accepted it" into "it landed / it bounced" (`F-041`).
+app.use('/api/webhooks/resend', ensureDb, resendWebhookRouter);
 
 // Populate req.auth on every request (does NOT reject unauthenticated requests).
 app.use(clerkAuth);

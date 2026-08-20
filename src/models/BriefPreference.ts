@@ -16,7 +16,9 @@ export interface BriefPreferenceDoc extends Document {
 
 const BriefPreferenceSchema = new Schema<BriefPreferenceDoc>(
   {
-    clerkUserId: { type: String, required: true, trim: true, index: true },
+    // No `index: true` here: the unique index below is the one declaration for
+    // this path. Having both made Mongoose warn on every boot (`F-055`).
+    clerkUserId: { type: String, required: true, trim: true },
     enabled: { type: Boolean, default: true },
     categoryIds: [{ type: Schema.Types.ObjectId, ref: 'Category', required: true }],
     regionIds: [{ type: Schema.Types.ObjectId, ref: 'Region', required: true }],

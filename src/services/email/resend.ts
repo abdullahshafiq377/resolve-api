@@ -27,6 +27,10 @@ export interface SendEmailInput {
 export interface SendEmailResult {
   status: 'sent' | 'failed' | 'no_email';
   error?: string;
+  // Resend's id for the accepted message. The only thing the delivery webhook
+  // has to match an event back to the row that sent it (`F-041`), so a caller
+  // that records the send must record this too.
+  messageId?: string | null;
 }
 
 // Sends an email via Resend. Never throws — returns a status the caller records
@@ -39,7 +43,7 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
 
   try {
     const replyTo = process.env.RESEARCH_REQUESTS_EMAIL_REPLY_TO;
-    const { error } = await resend.emails.send({
+    const { data, error } = await resend.emails.send({
       from,
       to: input.to,
       subject: input.subject,
@@ -47,8 +51,13 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
       text: input.text,
       ...(replyTo ? { replyTo } : {}),
     });
-    if (error) return { status: 'failed', error: String(error).slice(0, 500) };
-    return { status: 'sent' };
+    // `ErrorResponse` is `{ message, statusCode, name }`, so `String(error)` here
+    // recorded the literal "[object Object]" — the failure was detected but the
+    // reason was thrown away (`F-143`).
+    if (error) {
+      return { status: 'failed', error: `${error.name}: ${error.message}`.slice(0, 500) };
+    }
+    return { status: 'sent', messageId: data?.id ?? null };
   } catch (err) {
     return { status: 'failed', error: String(err).slice(0, 500) };
   }

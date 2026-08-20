@@ -105,16 +105,23 @@ describe('structured-output schemas', () => {
   });
 
   // Deliberately optional, and verified as genuinely optional against the live
-  // API. If a future edit adds them to `required`, the model is forced to invent
-  // a URL and an editorial note on every brief.
-  it('brief: url and editorialNote stay optional', () => {
+  // API. If a future edit adds it to `required`, the model is forced to invent an
+  // editorial note on every brief.
+  it('brief: editorialNote stays optional', () => {
     const properties = BRIEF_RESPONSE_SCHEMA.properties as Node;
-    const stories = properties.stories as Node;
-    const story = stories.items as Node;
-    assert.ok('url' in (story.properties as Node));
-    assert.ok(!((story.required as string[]) ?? []).includes('url'));
     assert.ok('editorialNote' in properties);
     assert.ok(!(BRIEF_RESPONSE_SCHEMA.required as string[]).includes('editorialNote'));
+  });
+
+  // A story used to carry an optional `url` that generateDraft would store as
+  // given. The model was handed each article's url in the payload, so echoing it
+  // back looked harmless — but it made the model a second author of a route, and
+  // the route it echoed was the wrong one (F-017). The link is derived from the
+  // article the story names; the model is not asked for it and cannot supply it.
+  it('brief: a story carries no url for the model to author', () => {
+    const stories = (BRIEF_RESPONSE_SCHEMA.properties as Node).stories as Node;
+    const story = stories.items as Node;
+    assert.ok(!('url' in (story.properties as Node)));
   });
 
   // AiSummaryFormat is a two-value union; a third format added without a schema

@@ -50,9 +50,10 @@ interface SegmentDraft {
 // are always present — previously they silently came back empty.
 //
 // `additionalProperties: false` is mandatory on every object under structured
-// outputs. `url` and `editorialNote` stay out of their `required` lists, which is
-// genuinely optional — verified against the live API rather than assumed, since
-// the strict-mode convention elsewhere is to require everything and allow null.
+// outputs. `editorialNote` stays out of its `required` list, which is genuinely
+// optional — verified against the live API rather than assumed, since the
+// strict-mode convention elsewhere is to require everything and allow null.
+// A story carries no `url`: the link is built from the article it names (F-017).
 // The story-count rule (5-7) is not expressible: the size keywords are dropped,
 // so it lives in the prompt and in the `.slice(0, 7)` below.
 export const BRIEF_RESPONSE_SCHEMA = {
@@ -67,7 +68,6 @@ export const BRIEF_RESPONSE_SCHEMA = {
         properties: {
           articleId: { type: 'string' },
           headline: { type: 'string' },
-          url: { type: 'string' },
         },
         required: ['articleId', 'headline'],
         additionalProperties: false,
@@ -97,8 +97,14 @@ function signatureHash(input: {
   return crypto.createHash('sha256').update(json).digest('hex');
 }
 
+// The webapp serves `/article/[slug]` and nothing else — there has never been an
+// `/articles` route — so every generated Brief story link was a 404: on the reader's
+// brief, in the Brief email, and in the admin review screens (F-017). Stories added by
+// hand through the admin picker go through the webapp's own `getArticleHref`, which was
+// always right, which is what kept the split out of sight. Keep this in step with
+// `getArticleHref` in `resolve-webapp/src/lib/articles-api.ts`.
 function articleUrl(article: ArticleDoc): string {
-  return `/articles/${article.slug}`;
+  return `/article/${article.slug}`;
 }
 
 async function articleQuery(
@@ -207,8 +213,8 @@ ${EDITORIAL_VOICE_PROMPT}`,
           '(2) explains why it matters and connects the threads of the developing story, and ' +
           '(3) looks ahead to what is scheduled or expected, framed as "expected", "due", or "watch for". ' +
           'Separate summary paragraphs with a blank line. ' +
-          'Also include 5-7 `stories` selected from the supplied articles (echo back each `articleId`, ' +
-          'its `headline`, and `url`), and an optional `editorialNote`.',
+          'Also include 5-7 `stories` selected from the supplied articles (echo back each `articleId` ' +
+          'and its `headline`), and an optional `editorialNote`.',
         articles: articlePayload,
       }),
     });
@@ -221,7 +227,7 @@ ${EDITORIAL_VOICE_PROMPT}`,
     const parsed = parseModelJson(raw) as {
       title?: unknown;
       summary?: unknown;
-      stories?: { articleId?: unknown; headline?: unknown; url?: unknown }[];
+      stories?: { articleId?: unknown; headline?: unknown }[];
       editorialNote?: unknown;
     };
     if (
@@ -241,7 +247,11 @@ ${EDITORIAL_VOICE_PROMPT}`,
         return {
           articleId: source._id as mongoose.Types.ObjectId,
           headline: story.headline.trim() || source.title,
-          url: typeof story.url === 'string' && story.url ? story.url : articleUrl(source),
+          // Derived from the article, never taken from the model. The model is handed
+          // each article's url in the payload, so echoing it back looks harmless — but
+          // it made the model a second author of a route, which is how the wrong prefix
+          // reached rows the admin never touched (F-017). The link is ours to build.
+          url: articleUrl(source),
           order: index + 1,
         };
       })
@@ -570,9 +580,38 @@ export async function processBriefGenerationBatch(input: {
   }
 }
 
-export async function regenerateSegment(segmentId: string, adminUserId: string) {
+/**
+ * Regenerating an approved segment is allowed, but never silently: approval is
+ * what sends the emails, and once they are out the mail cannot be recalled. The
+ * caller has to pass `acknowledgeSent` — the admin UI collects it as an explicit
+ * tick in the confirmation dialog — and the edition being replaced is recorded in
+ * `priorDeliveries` so the segment still shows that something went out (`F-013`).
+ */
+export async function regenerateSegment(
+  segmentId: string,
+  adminUserId: string,
+  options: { acknowledgeSent?: boolean } = {},
+) {
   const segment = await BriefSegment.findById(segmentId);
   if (!segment) throw httpError(404, 'not_found');
+  const wasApproved = segment.status === 'approved';
+  if (wasApproved && !options.acknowledgeSent) {
+    throw httpError(409, 'segment_regenerate_requires_acknowledgement');
+  }
+  // Counted before the model call, so the number recorded is the one that was
+  // true of the edition being replaced.
+  const emailSentCount = wasApproved
+    ? await BriefRecipient.countDocuments({ segmentId: segment._id, emailStatus: 'sent' })
+    : 0;
+  const priorDelivery = wasApproved
+    ? {
+        approvedAt: segment.approvedAt,
+        approvedBy: segment.approvedBy,
+        emailSentCount,
+        supersededAt: new Date(),
+        supersededBy: adminUserId,
+      }
+    : null;
   // Regenerate against a fresh window (now) so the manual admin redo picks up
   // articles published after the segment was first generated.
   const window = defaultArticleWindow(new Date());
@@ -617,6 +656,7 @@ export async function regenerateSegment(segmentId: string, adminUserId: string) 
         rejectedBy: null,
         rejectionReason: null,
       },
+      ...(priorDelivery ? { $push: { priorDeliveries: priorDelivery } } : {}),
     },
     { new: true, runValidators: true },
   );
