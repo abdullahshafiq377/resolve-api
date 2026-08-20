@@ -63,7 +63,19 @@ async function searchArticles(rx: RegExp, limit: number): Promise<SearchResult[]
 }
 
 async function searchShorts(rx: RegExp, limit: number): Promise<SearchResult[]> {
-  const docs = await Short.find({ status: 'published', $or: [{ title: rx }, { description: rx }] })
+  // `tags` is matched too (`F-059`). The admin editor asks for tags on every
+  // short and Short is the only model that carries them, so without this a term
+  // an editor deliberately tagged could never find the short — tags were dead
+  // data for discovery. A regex against a string array matches any element.
+  //
+  // No relevance ranking: a tag hit does not outrank a description hit, because
+  // nothing in this file ranks at all (see the header note — regex, not a text
+  // index, ordered newest-first for every type). Ranking one type only would be
+  // the inconsistency, not the fix.
+  const docs = await Short.find({
+    status: 'published',
+    $or: [{ title: rx }, { description: rx }, { tags: rx }],
+  })
     .sort({ publishedAt: -1, createdAt: -1 })
     .limit(limit)
     .select('title slug description')
