@@ -14,7 +14,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { clipBodyForTier, findGateIndex, stripGateNodes } from './articleGate';
 import { allowedTiersFor } from '../services/articleEmbeddings';
-import { resolveModelKey, providerModelFor, isSupportedImageMimeType } from './anthropic';
+import {
+  resolveModelKey,
+  providerModelFor,
+  isSupportedImageMimeType,
+  searchBudgetRemaining,
+  createNarrationFilter,
+} from './anthropic';
 import { tierAtLeast, type PlanTier } from '../middleware/auth';
 
 const TIERS: PlanTier[] = ['free', 'core', 'premium'];
@@ -158,5 +164,96 @@ test('image attachments are restricted to what the provider accepts', async (t) 
     for (const bad of ['image/heic', 'image/heif', 'image/svg+xml', 'image/bmp', 'image/tiff', 'application/pdf', 'image/', 'text/plain', 'IMAGE/PNG']) {
       assert.equal(isSupportedImageMimeType(bad), false, bad);
     }
+  });
+});
+
+// F-141: `max_uses` is a per-REQUEST cap, but a paused turn is resumed by re-sending,
+// so the full figure on every resume gave each continuation a fresh budget — 20 searches
+// against a documented 5. streamChat now carries the spend across continuations; these
+// pin the arithmetic it does. (The default is 5 unless WEB_SEARCH_MAX_USES overrides it,
+// so the assertions are written relative to the budget at zero spend.)
+test('the web-search budget is spent across a turn, not refreshed per request', async (t) => {
+  const full = searchBudgetRemaining(0);
+
+  await t.test('an unspent turn gets the whole budget', () => {
+    assert.ok(full >= 1);
+  });
+
+  await t.test('each search taken comes off the budget', () => {
+    for (let used = 0; used <= full; used += 1) {
+      assert.equal(searchBudgetRemaining(used), full - used);
+    }
+  });
+
+  await t.test('an exhausted budget floors at zero and never goes negative', () => {
+    assert.equal(searchBudgetRemaining(full), 0);
+    // The old bug's signature: a continuation asking for the full figure again.
+    assert.equal(searchBudgetRemaining(full + 10), 0);
+  });
+});
+
+// F-006: retrieval planning arrives as its own short assistant text block, sitting
+// between the tool calls — "Let me wait a moment and retry with a single focused
+// search." was scored a clean answer by the harness but read as narration to the
+// user. The filter recognises it by shape rather than by wording: short, and
+// followed by a tool call. These pin that shape, including the cases where holding
+// text back must NOT swallow it.
+test('the narration filter drops tool hand-off lines and keeps everything else', async (t) => {
+  const NARRATION = 'Let me wait a moment and retry with a single focused search.';
+
+  await t.test('a short block followed by a search is never emitted', () => {
+    const f = createNarrationFilter();
+    assert.equal(f.onTextBlockStart(), '');
+    assert.equal(f.onText(NARRATION), '');
+    f.onToolUse();
+    assert.equal(f.flush(), '');
+  });
+
+  await t.test('a short block that ends the turn is emitted in full', () => {
+    const f = createNarrationFilter();
+    f.onTextBlockStart();
+    assert.equal(f.onText('No, that is not the case.'), '');
+    assert.equal(f.flush(), 'No, that is not the case.');
+  });
+
+  await t.test('a long block passes the threshold and then streams live', () => {
+    const f = createNarrationFilter(20);
+    f.onTextBlockStart();
+    assert.equal(f.onText('The border is in an'), '');
+    // Crossing the threshold releases everything held so far in one piece…
+    assert.equal(f.onText(' open conflict cycle.'), 'The border is in an open conflict cycle.');
+    // …and every delta after it goes straight through, unbuffered.
+    assert.equal(f.onText(' It began in February.'), ' It began in February.');
+    assert.equal(f.flush(), '');
+  });
+
+  await t.test('a long block is still emitted even if a search follows it', () => {
+    // Emitted text cannot be recalled, so the threshold is the whole commitment:
+    // past it, the block is treated as the answer whatever comes next.
+    const f = createNarrationFilter(10);
+    f.onTextBlockStart();
+    assert.equal(f.onText('Inflation is reaccelerating.'), 'Inflation is reaccelerating.');
+    f.onToolUse();
+    assert.equal(f.flush(), '');
+  });
+
+  await t.test('two text blocks in a row both survive — only a tool call drops one', () => {
+    const f = createNarrationFilter();
+    f.onTextBlockStart();
+    f.onText('First half.');
+    assert.equal(f.onTextBlockStart(), 'First half.');
+    f.onText('Second half.');
+    assert.equal(f.flush(), 'Second half.');
+  });
+
+  await t.test('held text survives a pause_turn continuation before being judged', () => {
+    // The filter outlives the request loop precisely so a block that ends a paused
+    // message can still be dropped by a tool call in the message that resumes it.
+    const f = createNarrationFilter();
+    f.onTextBlockStart();
+    f.onText(NARRATION);
+    // …request boundary here; no flush() is called…
+    f.onToolUse();
+    assert.equal(f.flush(), '');
   });
 });

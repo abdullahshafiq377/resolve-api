@@ -35,3 +35,6 @@ Thumbs.db
 /.claude
 /src/scripts/
 /graphify-out
+
+# Full answers dumped by check:narration for offline re-scoring (F-006).
+narration-transcript.json

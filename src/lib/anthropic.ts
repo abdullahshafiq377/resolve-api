@@ -6,11 +6,23 @@ import type { PlanTier } from '../middleware/auth';
 // CLAUDE_API_KEY. Accept either so neither name is load-bearing.
 const API_KEY = process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY;
 
-const CHAT_MODEL_VELO = process.env.ANTHROPIC_CHAT_MODEL_VELO || 'claude-haiku-4-5';
-const CHAT_MODEL_CORE = process.env.ANTHROPIC_CHAT_MODEL_CORE || 'claude-sonnet-5';
-const CHAT_MODEL_MAX = process.env.ANTHROPIC_CHAT_MODEL_MAX || 'claude-opus-4-8';
+const CHAT_MODEL_VELO = process.env.ANTHROPIC_CHAT_MODEL_VELO || 'claude-sonnet-5';
+const CHAT_MODEL_CORE = process.env.ANTHROPIC_CHAT_MODEL_CORE || 'claude-opus-5';
+const CHAT_MODEL_MAX = process.env.ANTHROPIC_CHAT_MODEL_MAX || 'claude-opus-5';
 
 const WEB_SEARCH_MAX_USES = Math.max(1, Number(process.env.WEB_SEARCH_MAX_USES) || 5);
+
+// `max_uses` is enforced per REQUEST, not per turn — and one turn can span several
+// requests, because a paused turn is resumed by re-sending (see MAX_PAUSE_CONTINUATIONS).
+// Sending the full figure on every resume handed each continuation a fresh budget, so the
+// real ceiling was WEB_SEARCH_MAX_USES x (MAX_PAUSE_CONTINUATIONS + 1) — 20 searches
+// against a documented 5 (FINDINGS F-141). The budget is now carried across continuations:
+// each resume asks for what is left, and a turn that has spent it all resumes with no
+// search tool at all, which makes the model answer from what it already gathered rather
+// than burning a request on a tool it cannot use.
+export function searchBudgetRemaining(used: number): number {
+  return Math.max(0, WEB_SEARCH_MAX_USES - used);
+}
 
 // Ceiling for the non-streaming utility calls (Brief, AI Summary). Both produce
 // short structured JSON; the cap exists so a runaway generation cannot bill
@@ -104,20 +116,25 @@ export function providerModelFor(key: ChatModelKey): string {
 }
 
 // ── Per-tier request shape ──────────────────────────────────────────────────
-// The three tiers do NOT share one config shape, and the differences are hard
-// API constraints rather than preferences (all verified against the live API):
+// Three tiers, two provider models: velo runs Sonnet 5, core and max both run
+// Opus 5 and are separated by `effort` alone (core high, max max).
 //
-//   · `output_config.effort` is rejected on Haiku 4.5 ("This model does not
-//     support the effort parameter") — velo must omit it entirely.
-//   · The dynamic-filtering web search tool `web_search_20260209` is rejected on
-//     Haiku 4.5; velo gets the older basic `web_search_20250305`. Behaviourally
-//     the same, noisier results.
-//   · Omitting `thinking` is NOT a safe default: Sonnet 5 runs adaptive when the
-//     field is absent while Opus 4.8 runs without thinking. Both are set
-//     explicitly so neither depends on a per-model default.
+//   · `output_config.effort` is supported on both Sonnet 5 and Opus 5 across the
+//     full low–max range, so every tier now carries one. The Haiku 4.5 constraint
+//     that forced velo to omit it no longer applies.
+//   · Every tier now takes the dynamic-filtering `web_search_20260209`. The basic
+//     `web_search_20250305` existed only because Haiku 4.5 rejected the newer
+//     tool, which closes the migration plan's open item 5 (velo search quality).
+//   · Omitting `thinking` is NOT a safe default — it has meant different things on
+//     different models — so it is always explicit. Thinking is ON for all three:
+//     it is also the routing fix for F-006, since a model with no thinking channel
+//     plans in a visible text block instead, and the stream loop drops `thinking`
+//     blocks but forwards `text`.
+//   · `thinking: {type:'disabled'}` is rejected on Opus 5 at effort xhigh/max, so
+//     max could not disable it even if we wanted to.
 //
-// max_tokens caps thinking AND response text together, so core/max carry more
-// headroom than the visible answer needs.
+// max_tokens caps thinking AND response text together, so every tier needs
+// headroom well above the visible answer.
 interface TierConfig {
   model: string;
   maxTokens: number;
@@ -129,25 +146,124 @@ interface TierConfig {
 const TIER_CONFIG: Record<ChatModelKey, TierConfig> = {
   velo: {
     model: MODEL_BY_KEY.velo,
-    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_VELO) || 4_096,
-    thinking: { type: 'disabled' },
-    webSearchType: 'web_search_20250305',
-  },
-  core: {
-    model: MODEL_BY_KEY.core,
-    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_CORE) || 16_000,
+    // Was 4,096 for Haiku with thinking off. Sonnet 5 thinks inside the same cap,
+    // so the old ceiling would truncate a long free-tier answer.
+    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_VELO) || 16_000,
     thinking: { type: 'adaptive' },
+    // 'low' first, then raised: at low effort velo narrated its own retrieval in 4 of 8
+    // harness runs while core (same family, effort high) narrated in 0 of 8 — thinking
+    // depth is what keeps planning out of the visible text block (F-006).
     effort: 'medium',
     webSearchType: 'web_search_20260209',
   },
-  max: {
-    model: MODEL_BY_KEY.max,
-    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_MAX) || 24_000,
+  core: {
+    model: MODEL_BY_KEY.core,
+    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_CORE) || 32_000,
     thinking: { type: 'adaptive' },
     effort: 'high',
     webSearchType: 'web_search_20260209',
   },
+  max: {
+    model: MODEL_BY_KEY.max,
+    maxTokens: Number(process.env.ANTHROPIC_MAX_TOKENS_MAX) || 64_000,
+    thinking: { type: 'adaptive' },
+    effort: 'max',
+    webSearchType: 'web_search_20260209',
+  },
 };
+
+// Appended to the system prompt for the one request that resumes a turn whose
+// search budget is gone. Without it the model finds itself with no search tool,
+// treats that absence as news, and tells the reader about it — three of eight runs
+// in the 19 August sweep said "against a search limit just now", "the REPL is fine
+// now", "my check of outside sources did not come back" (F-006, the directive §7
+// half). Telling it not to mention the limit was not enough on its own; it needs
+// the sentence it is supposed to write instead.
+const SOURCES_EXHAUSTED_DIRECTIVE = `
+
+# Sources for this turn
+You now have all the source material you are going to get for this turn. Write the
+answer from what you already have.
+
+Never tell the reader anything about how the material was gathered. Do not mention
+searching, tools, retries, limits, quotas, budgets, sessions or why you stopped
+looking — none of that exists as far as the reader is concerned, and naming it
+breaks the white-label rule in the same way naming the model would.
+
+Where something could not be established, say so in editorial terms and move on:
+"I could not confirm the latest figure", "there is no reliable public reporting on
+this yet". Never explain why.`;
+
+// ── Narration filter ────────────────────────────────────────────────────────
+// F-006: the model plans its retrieval out loud, and that planning arrives as its
+// own assistant text block sitting between the tool calls — which is why the
+// narration and the answer run together with no space at the join ("…in 2026.Now
+// let me search…"). The prompt cannot govern it, because the Voice section is
+// about the answer and the model does not consider this to be the answer.
+//
+// It can be recognised structurally instead: a SHORT text block that a
+// `server_tool_use` immediately follows was written to introduce that tool call,
+// never to the reader. So a text block is held back until one of three things
+// settles what it was:
+//
+//   · it passes NARRATION_HOLD_CHARS  — too long to be a hand-off line, so it is
+//     the answer: flush it and stream the rest of that block live
+//   · a tool call starts             — it was narration: drop it unsent
+//   · the turn ends, or another text block starts — nothing followed it, so it
+//     was real text: flush it
+//
+// The cost is that the first NARRATION_HOLD_CHARS of an answer arrive in one piece
+// rather than token by token. The risk is that a genuinely short piece of answer
+// text followed by one more search is dropped; the threshold is set well above the
+// length of every narration line observed (the longest was 96 characters) and well
+// below a paragraph of answer, which is the trade this makes deliberately.
+const NARRATION_HOLD_CHARS = 400;
+
+export interface NarrationFilter {
+  /** Text arriving in the current block. Returns what should be emitted now. */
+  onText(text: string): string;
+  /** A new text block began; anything still held belongs to the previous one. */
+  onTextBlockStart(): string;
+  /** A server tool call began; anything still held was its introduction. */
+  onToolUse(): void;
+  /** End of turn. Returns whatever is still held. */
+  flush(): string;
+}
+
+export function createNarrationFilter(limit: number = NARRATION_HOLD_CHARS): NarrationFilter {
+  let held = '';
+  // Once a block is past the threshold it is the answer, and the rest of it
+  // streams straight through — re-buffering it would stutter the output.
+  let streaming = false;
+
+  return {
+    onText(text) {
+      if (streaming) return text;
+      held += text;
+      if (held.length <= limit) return '';
+      const out = held;
+      held = '';
+      streaming = true;
+      return out;
+    },
+    onTextBlockStart() {
+      const out = held;
+      held = '';
+      streaming = false;
+      return out;
+    },
+    onToolUse() {
+      held = '';
+      streaming = false;
+    },
+    flush() {
+      const out = held;
+      held = '';
+      streaming = false;
+      return out;
+    },
+  };
+}
 
 // ── Stream events ───────────────────────────────────────────────────────────
 // Web search runs server-side mid-turn, which stalls the text stream for seconds.
@@ -229,21 +345,32 @@ export async function* streamChat(params: StreamChatParams): AsyncGenerator<Chat
   const cfg = TIER_CONFIG[params.modelKey];
   const messages = toMessages(params.history, params.message, params.images ?? []);
 
+  // Spans the whole turn, every continuation included.
+  let searchesUsed = 0;
+
+  // Also spans the whole turn: a text block can be the last thing in a paused
+  // message and be followed by a tool call in the message that resumes it, so the
+  // held text has to survive the continuation boundary to be judged correctly.
+  const narration = createNarrationFilter();
+
   for (let attempt = 0; attempt <= MAX_PAUSE_CONTINUATIONS; attempt += 1) {
+    const budget = searchBudgetRemaining(searchesUsed);
     const stream = ai().messages.stream(
       {
         model: cfg.model,
         max_tokens: cfg.maxTokens,
-        system: params.systemPrompt,
+        system: budget > 0 ? params.systemPrompt : params.systemPrompt + SOURCES_EXHAUSTED_DIRECTIVE,
         thinking: cfg.thinking,
         ...(cfg.effort ? { output_config: { effort: cfg.effort } } : {}),
-        tools: [
-          {
-            type: cfg.webSearchType,
-            name: 'web_search',
-            max_uses: WEB_SEARCH_MAX_USES,
-          } as Anthropic.ToolUnion,
-        ],
+        tools: budget > 0
+          ? [
+              {
+                type: cfg.webSearchType,
+                name: 'web_search',
+                max_uses: budget,
+              } as Anthropic.ToolUnion,
+            ]
+          : [],
         messages,
       },
       { signal: params.signal },
@@ -253,7 +380,14 @@ export async function* streamChat(params: StreamChatParams): AsyncGenerator<Chat
       if (event.type === 'content_block_start') {
         const block = event.content_block;
         if (block.type === 'server_tool_use' && block.name === 'web_search') {
+          // Whatever text was held introduced this search rather than addressing
+          // the reader, so it is dropped rather than emitted (F-006).
+          narration.onToolUse();
+          searchesUsed += 1;
           yield { type: 'search', status: 'started' };
+        } else if (block.type === 'text') {
+          const flushed = narration.onTextBlockStart();
+          if (flushed) yield { type: 'text', text: flushed };
         } else if (block.type === 'web_search_tool_result') {
           // A server-tool failure arrives as HTTP 200 with an error OBJECT here
           // rather than a list of results, so this must not be iterated blindly.
@@ -265,7 +399,8 @@ export async function* streamChat(params: StreamChatParams): AsyncGenerator<Chat
           yield { type: 'search', status: 'done' };
         }
       } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        yield { type: 'text', text: event.delta.text };
+        const out = narration.onText(event.delta.text);
+        if (out) yield { type: 'text', text: out };
       }
     }
 
@@ -275,13 +410,23 @@ export async function* streamChat(params: StreamChatParams): AsyncGenerator<Chat
       throw new ModelRefusalError(finalMessage.stop_details?.category ?? null);
     }
 
-    if (finalMessage.stop_reason !== 'pause_turn') return;
+    if (finalMessage.stop_reason !== 'pause_turn') {
+      // The turn is over, so nothing can follow the held text: it was real.
+      const tail = narration.flush();
+      if (tail) yield { type: 'text', text: tail };
+      return;
+    }
 
     // Paused mid-turn. Append the assistant turn and re-send; the API detects the
     // trailing server_tool_use block and resumes on its own — deliberately no
     // extra "Continue." user message.
     messages.push({ role: 'assistant', content: finalMessage.content });
   }
+
+  // Out of continuations rather than finished, but the same reasoning applies —
+  // nothing further will arrive to prove the held text was a hand-off line.
+  const tail = narration.flush();
+  if (tail) yield { type: 'text', text: tail };
 
   console.warn('[anthropic] gave up resuming after', MAX_PAUSE_CONTINUATIONS, 'pause_turn continuations');
 }
