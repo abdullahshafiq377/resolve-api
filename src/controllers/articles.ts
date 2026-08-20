@@ -49,8 +49,14 @@ import {
 } from '../services/regions';
 import { getTier } from '../middleware/auth';
 import { clipBodyForAudience, countGateNodes, keepFirstGateNode, type Audience } from '../lib/articleGate';
+import { DEFAULT_GATE_FRACTION, isValidGateFraction } from '../lib/gatePlacement';
+import { planGateRow, planUngateRow, type GateRow } from '../services/articleGateBulk';
 
 const MAX_LIMIT = 100;
+// Gating rewrites bodies and re-embeds every published article it touches, and
+// the embedding provider is rate-limited. One call therefore covers a page of
+// the admin table, not the archive.
+const GATE_BULK_MAX = 50;
 const FEATURED_MAX = 5;
 const HIGHLIGHT_MAX = 3;
 const KEY_STORY_MAX = 5;
@@ -862,6 +868,113 @@ export async function bulk(req: Request, res: Response) {
         ),
     );
     return res.json({ action, categoryId: String(categoryDoc._id), affected: articles.length });
+  }
+
+  if (action === 'gate' || action === 'gate-preview') {
+    // The one bulk action that edits bodies: `gateTier` is set IFF the body holds
+    // a gate node, so the field cannot be written on its own. That is why this
+    // action has a preview at all — an editor should see where the cut lands
+    // before forty articles are rewritten.
+    if (objectIds.length > GATE_BULK_MAX) {
+      return res.status(400).json({ error: 'gate_bulk_too_many', max: GATE_BULK_MAX });
+    }
+
+    const requestedTier = (req.body as { gateTier?: unknown }).gateTier;
+    const ungate = requestedTier === 'none' || requestedTier === '' || requestedTier === null;
+    if (!ungate && !GATE_TIERS.includes(requestedTier as GateTier)) {
+      return res.status(400).json({ error: 'invalid_gateTier' });
+    }
+    const gateTier = ungate ? null : (requestedTier as GateTier);
+
+    const requestedFraction = (req.body as { fraction?: unknown }).fraction;
+    if (requestedFraction !== undefined && !isValidGateFraction(requestedFraction)) {
+      return res.status(400).json({ error: 'invalid_gate_fraction' });
+    }
+    const fraction = (requestedFraction as number | undefined) ?? DEFAULT_GATE_FRACTION;
+
+    const plan = (article: ArticleDoc, expectBodyHash?: string) =>
+      ungate
+        ? planUngateRow(article, { expectBodyHash })
+        : planGateRow(article, { gateTier: gateTier as GateTier, fraction, expectBodyHash });
+
+    if (action === 'gate-preview') {
+      const rows = articles.map((article) => plan(article).row);
+      return res.json({
+        action,
+        gateTier,
+        fraction,
+        planned: rows.filter((row) => row.status === 'planned').length,
+        skipped: rows.filter((row) => row.status === 'skipped').length,
+        rows,
+      });
+    }
+
+    // Applying takes the hashes the preview handed out, never its indexes: the
+    // placement is recomputed here, and an article edited in between is skipped
+    // rather than cut at a point nobody approved.
+    const expectations = (req.body as { expect?: unknown }).expect;
+    if (!Array.isArray(expectations) || expectations.length === 0) {
+      return res.status(400).json({ error: 'gate_expect_required' });
+    }
+    const expectedHashes = new Map<string, string>();
+    for (const entry of expectations) {
+      const { id, bodyHash } = (entry ?? {}) as { id?: unknown; bodyHash?: unknown };
+      if (typeof id === 'string' && typeof bodyHash === 'string') expectedHashes.set(id, bodyHash);
+    }
+    const unpreviewed = articles
+      .map((article) => String(article._id))
+      .filter((id) => !expectedHashes.has(id));
+    if (unpreviewed.length > 0) {
+      return res.status(400).json({ error: 'gate_expect_missing_ids', ids: unpreviewed });
+    }
+
+    const rows: GateRow[] = [];
+    const resync: ArticleDoc[] = [];
+
+    for (const article of articles) {
+      const { row, body } = plan(article, expectedHashes.get(String(article._id)));
+      rows.push(row);
+      if (!body) continue;
+
+      const sanitized = keepFirstGateNode(body);
+      // The same pair check the single-article handlers run. It should never fire
+      // here — the planner produces exactly one gate node, or none and no tier —
+      // so if it does, the write is wrong and the row fails loudly.
+      assertGateConsistency(sanitized, ungate ? undefined : (gateTier as GateTier));
+
+      const updated = await Article.findByIdAndUpdate(
+        article._id,
+        ungate
+          ? { $set: { body: sanitized }, $unset: { gateTier: 1 } }
+          : { $set: { body: sanitized, gateTier } },
+        { new: true, runValidators: true },
+      );
+
+      await recordActivities(
+        toArticleActivity(article._id as mongoose.Types.ObjectId, actorId, [
+          {
+            action: 'gate_changed',
+            metadata: { from: article.gateTier ?? null, to: gateTier },
+          },
+        ]),
+      );
+
+      if (updated && updated.status === 'published') resync.push(updated);
+    }
+
+    // Sequentially, and after every write: moving the gate moves the pre/post
+    // split the chunks are built from, so each of these is a fresh embedding
+    // call against a provider with a per-minute ceiling.
+    for (const article of resync) await syncArticleEmbeddings(article);
+
+    return res.json({
+      action,
+      gateTier,
+      fraction,
+      affected: rows.filter((row) => row.status === 'planned').length,
+      skipped: rows.filter((row) => row.status === 'skipped').length,
+      rows,
+    });
   }
 
   return res.status(400).json({ error: 'invalid_action' });

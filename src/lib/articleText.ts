@@ -123,16 +123,27 @@ function blockToText(node: JSONContent): string {
   }
 }
 
+function topLevelBlocks(body: JSONContent): JSONContent[] {
+  if (body == null) return [];
+  if (Array.isArray(body)) return body;
+  return Array.isArray(body.content) ? body.content : [];
+}
+
+// Plain-text length of each top-level block, in document order.
+//
+// Gate placement needs to weigh the body by how much a reader actually reads,
+// not by node count: a body of five custom blocks and two paragraphs is mostly
+// text that lives in `attrs`, which only `blockToText` knows how to reach. Same
+// walker as `extractPlainText`, so "where is one third of the article" and "what
+// is the article" can never disagree.
+export function topLevelTextLengths(body: JSONContent): number[] {
+  return topLevelBlocks(body).map((node) => blockToText(node).trim().length);
+}
+
 // Traverse a Tiptap document body and return its plain text. Accepts the doc
 // node ({ type:'doc', content:[…] }) or a bare content array.
 export function extractPlainText(body: JSONContent): string {
-  if (body == null) return '';
-  const blocks: JSONContent[] = Array.isArray(body)
-    ? body
-    : Array.isArray(body.content)
-      ? body.content
-      : [];
-  return blocks
+  return topLevelBlocks(body)
     .map(blockToText)
     .map((s) => s.trim())
     .filter(Boolean)

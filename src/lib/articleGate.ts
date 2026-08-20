@@ -28,17 +28,17 @@ export const TEASER_NODES_AFTER_GATE = 3;
 // gated content in its own right (and expensive to render), so the teaser stops
 // at the first node that isn't one of these rather than skipping over it —
 // skipping would pull later, further-in prose forward into public view.
-const TEASER_NODE_TYPES = new Set(['paragraph', 'heading']);
+export const TEASER_NODE_TYPES = new Set(['paragraph', 'heading']);
 
 // Bodies are stored as a doc node ({ type:'doc', content:[…] }), but the older
 // helpers also accept a bare content array. Read either; give back what we got.
-function nodesOf(body: JSONContent): JSONContent[] {
+export function nodesOf(body: JSONContent): JSONContent[] {
   if (body == null) return [];
   if (Array.isArray(body)) return body;
   return Array.isArray(body.content) ? body.content : [];
 }
 
-function withNodes(body: JSONContent, nodes: JSONContent[]): JSONContent {
+export function withNodes(body: JSONContent, nodes: JSONContent[]): JSONContent {
   if (Array.isArray(body)) return nodes;
   if (body == null || typeof body !== 'object') return { type: 'doc', content: nodes };
   return { ...body, content: nodes };
